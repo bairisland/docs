@@ -1,0 +1,61 @@
+---
+title: "ManticScore: AI Product Development Platform"
+description: "ManticScore is an AI-powered product development platform. Research markets, plan features, monitor competitors, and ship code — all from one workspace."
+---
+
+ManticScore is an AI-powered product development platform built for founders and product teams. From validating a new idea with deep market research to generating GitHub pull requests autonomously, ManticScore compresses weeks of product work into hours.
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Make your first API call and run your first market research in minutes.
+  </Card>
+  <Card title="Authentication" icon="key" href="/authentication">
+    Learn how to authenticate with the ManticScore API using session tokens.
+  </Card>
+  <Card title="Market Research" icon="magnifying-glass-chart" href="/features/market-research">
+    Run AI-powered market research to find competitors, gaps, and opportunities.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/overview">
+    Browse the complete REST API reference with request and response examples.
+  </Card>
+</CardGroup>
+
+## What ManticScore does
+
+ManticScore combines several AI pipelines into a single product workspace:
+
+- **Market Research** — Submit a product idea and receive a structured analysis: incumbent competitors, emerging players, key features, signals, and white-space opportunities.
+- **Feature Deep Research** — Drill into specific features across multiple competitors with multi-stage AI analysis and build estimates.
+- **Build Graphs** — Turn research into a recursive build tree of implementable tasks, each with specs, acceptance criteria, and risk ratings.
+- **AgentForge** — Give the AI a coding task and a GitHub repo; it plans, writes code, and opens a pull request autonomously.
+- **Competitive Signals** — Monitor companies and topics for real-time signals — press releases, product launches, job postings — with AI-generated insights.
+- **AI Chat Agent** — Chat with an agent that has full context of your research and build plans, plus access to 1,000+ integrations via Composio.
+- **Integrations** — Ship your build plan directly to Linear, Jira, Slack, Notion, or GitHub with one tap.
+- **Automations** — Configure "when research completes → post to Slack" style event-driven automations.
+
+## How the API works
+
+All ManticScore functionality is exposed through a REST API at `https://api.manticscore.com`. Long-running operations (research, build graph generation, Forge runs) are asynchronous — you start a job and then stream progress events via NDJSON or WebSocket.
+
+<Steps>
+  <Step title="Authenticate">
+    Exchange your Clerk JWT for a session token with `POST /auth/session`. Use the token as a Bearer header on all subsequent requests.
+  </Step>
+  <Step title="Start a job">
+    Submit a request to start a research job, build graph, or Forge run. You receive a job ID immediately.
+  </Step>
+  <Step title="Stream progress">
+    Connect to the events endpoint (`GET /research/{job_id}/events`) to receive real-time NDJSON progress updates.
+  </Step>
+  <Step title="Use the results">
+    Once complete, fetch results directly or export them to your connected tools (Linear, Jira, Slack, Notion).
+  </Step>
+</Steps>
+
+## Base URL
+
+```
+https://api.manticscore.com
+```
+
+All endpoints listed in this documentation are relative to this base URL.

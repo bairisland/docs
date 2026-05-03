@@ -1,0 +1,483 @@
+---
+title: "Integrations API — connect, configure, and execute tools"
+description: "Connect GitHub, Linear, Jira, Slack, Notion, and Gmail. Configure per-toolkit defaults, discover resources, and invoke 1,000+ tools via the universal executor."
+---
+
+The Integrations API lets you connect third-party tools to ManticScore, configure their defaults so one-tap actions work without extra prompting, and execute any of 1000+ Composio tools directly. Connections are managed through OAuth flows brokered by Composio. Once a toolkit is connected, ManticScore auto-discovers your resources (repos, teams, channels) and saves smart defaults for use in ship, ship-research, and automation flows.
+
+## List all integrations
+
+Returns the full inventory of available integrations and their connection status for the authenticated user.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/integrations/composio/tools" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "tools": [
+    {
+      "id": "github",
+      "name": "GitHub",
+      "category": "code",
+      "logo_url": "https://cdn.manticscore.com/logos/github.svg",
+      "description": "Create branches, open PRs, and trigger Forge coding runs.",
+      "status": "connected",
+      "agent_capabilities": ["create_pr", "list_repos"],
+      "config_fields": ["repo", "default_branch", "branch_prefix"],
+      "account_id": "acc_abc123",
+      "can_refresh": false
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "category": "tasks",
+      "logo_url": "https://cdn.manticscore.com/logos/linear.svg",
+      "description": "Create and manage issues from build nodes.",
+      "status": "disconnected",
+      "agent_capabilities": [],
+      "config_fields": [],
+      "account_id": null,
+      "can_refresh": false
+    }
+  ],
+  "total_connected": 1,
+  "total_available": 18
+}
+```
+
+<ResponseField name="tools" type="object[]">
+  <Expandable title="tool properties">
+    <ResponseField name="id" type="string">Toolkit slug (e.g. `github`, `linear`, `slack`).</ResponseField>
+    <ResponseField name="status" type="string">`connected`, `expired`, `disabled`, or `disconnected`.</ResponseField>
+    <ResponseField name="agent_capabilities" type="string[]">Tool names the agent can invoke for this toolkit.</ResponseField>
+    <ResponseField name="config_fields" type="string[]">Configurable default fields for this toolkit.</ResponseField>
+    <ResponseField name="account_id" type="string">Composio connected-account ID. Present only when `status` is `connected` or `expired`.</ResponseField>
+    <ResponseField name="can_refresh" type="boolean">Whether the expired token can be refreshed without re-authenticating.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Connect a toolkit
+
+Starts the OAuth flow for a toolkit. Open the returned URL in a browser to complete authentication.
+
+<Tabs>
+  <Tab title="Profile route">
+    ```bash curl
+    curl -X POST https://api.manticscore.com/profile/integrations/linear/connect \
+      -H "Authorization: Bearer <token>"
+    ```
+
+    ```json 200 response
+    {
+      "url": "https://composio.dev/oauth/linear?session=...",
+      "toolkit": "linear"
+    }
+    ```
+  </Tab>
+  <Tab title="Composio route">
+    ```bash curl
+    curl -X POST https://api.manticscore.com/integrations/composio/linear/connect \
+      -H "Authorization: Bearer <token>"
+    ```
+
+    ```json 200 response
+    {
+      "url": "https://composio.dev/oauth/linear?session=..."
+    }
+    ```
+  </Tab>
+</Tabs>
+
+After the user authenticates in the browser, Composio redirects to the ManticScore callback which fires background resource discovery for the newly connected toolkit.
+
+---
+
+## Disconnect a toolkit
+
+<Tabs>
+  <Tab title="Profile route">
+    ```bash curl
+    curl -X POST https://api.manticscore.com/profile/integrations/linear/disconnect \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="Composio route">
+    ```bash curl
+    curl -X POST https://api.manticscore.com/integrations/composio/linear/disconnect \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+</Tabs>
+
+```json 200 response
+{"success": true}
+```
+
+---
+
+## Refresh an expired connection
+
+Refreshes an expired OAuth token without requiring the user to re-authenticate. Use `account_id` (the Composio connected-account ID, not the toolkit slug) from the tools list.
+
+<Tabs>
+  <Tab title="Profile route">
+    ```bash curl
+    curl -X POST https://api.manticscore.com/profile/integrations/acc_abc123/refresh \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+  <Tab title="Composio route">
+    ```bash curl
+    curl -X POST https://api.manticscore.com/integrations/composio/acc_abc123/refresh \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Tab>
+</Tabs>
+
+```json 200 response
+{"refreshed": true}
+```
+
+If the token cannot be refreshed silently, `refreshed` is `false` and an `error` string explains why. In that case, prompt the user to reconnect.
+
+---
+
+## Check connection status
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/integrations/composio/linear/status" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+Returns the Composio connection status payload for the specified toolkit.
+
+### List all connections
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/integrations/composio/connections" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "connections": []
+}
+```
+
+---
+
+## Configure toolkit defaults
+
+Sets the defaults the agent and ship endpoints use when a tool call omits optional fields. This is a sparse merge — only the fields you send are updated; all others remain unchanged. Pass `null` as a value to remove a field.
+
+<Tabs>
+  <Tab title="Profile route">
+    ```bash curl
+    curl -X PATCH https://api.manticscore.com/profile/integrations/linear/defaults \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"team_id": "TEAM123", "default_priority": 2}'
+    ```
+  </Tab>
+  <Tab title="Integrations route">
+    ```bash curl
+    curl -X PATCH https://api.manticscore.com/integrations/linear/defaults \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"team_id": "TEAM123", "default_priority": 2}'
+    ```
+  </Tab>
+</Tabs>
+
+```json 200 response
+{
+  "toolkit": "linear",
+  "defaults": {
+    "team_id": "TEAM123",
+    "default_priority": 2
+  }
+}
+```
+
+Returns `404` if the toolkit is not connected. Connect it first, then configure defaults.
+
+### Available fields by toolkit
+
+<AccordionGroup>
+  <Accordion title="GitHub">
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `repo` | string | Default repository in `owner/repo` format. |
+    | `default_branch` | string | Base branch for PRs (e.g. `main`). |
+    | `branch_prefix` | string | Prefix for auto-generated branch names. |
+    | `pr_reviewers` | string[] | GitHub usernames to assign as reviewers. |
+  </Accordion>
+  <Accordion title="Linear">
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `team_id` | string | Linear team ID. |
+    | `team_name` | string | Display name of the team. |
+    | `project_id` | string | Linear project ID. |
+    | `default_priority` | number | Priority 0 (no priority) to 4 (urgent). |
+    | `default_labels` | string[] | Label names to apply to created issues. |
+    | `assignee_id` | string | Linear user ID to assign issues to. |
+  </Accordion>
+  <Accordion title="Jira">
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `project_key` | string | Jira project key (e.g. `ENG`). |
+    | `project_name` | string | Display name of the Jira project. |
+    | `default_issue_type` | string | Issue type (e.g. `Task`, `Story`). |
+    | `default_priority` | string | Jira priority name (e.g. `Medium`). |
+    | `component_id` | string | Jira component to assign to new issues. |
+  </Accordion>
+  <Accordion title="Slack">
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `channel_id` | string | Default channel ID for general notifications. |
+    | `channel_name` | string | Display name of the default channel. |
+    | `research_channel` | string | Channel ID for research completion notifications. |
+    | `builds_channel` | string | Channel ID for build graph notifications. |
+    | `signals_channel` | string | Channel ID for signal alerts. |
+    | `format` | string | Message format: `summary` or `detailed`. |
+    | `notify_on_research` | boolean | Send a message when research completes. |
+    | `notify_on_build` | boolean | Send a message when a build graph is ready. |
+    | `notify_on_signal` | boolean | Send a message when a new signal is detected. |
+  </Accordion>
+  <Accordion title="Notion">
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `parent_id` | string | Notion page or database ID to create pages under. |
+    | `parent_title` | string | Display title of the parent. |
+    | `research_db_id` | string | Database ID for research exports. |
+    | `build_plan_db_id` | string | Database ID for build plan exports. |
+  </Accordion>
+  <Accordion title="Gmail">
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `default_cc` | string | Email address to CC on outbound messages. |
+    | `signature` | string | Signature appended to outbound emails. |
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Trigger resource discovery
+
+Manually discovers resources for a connected toolkit (repositories, teams, channels, etc.) and saves smart defaults. This runs automatically when you first connect a toolkit; use this endpoint to refresh after account changes.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/integrations/linear/discover \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "defaults": {
+    "team_id": "TEAM123",
+    "team_name": "Engineering"
+  },
+  "resources": {
+    "teams": [
+      {"id": "TEAM123", "name": "Engineering"}
+    ]
+  }
+}
+```
+
+Returns `400` if the toolkit is not connected.
+
+---
+
+## Execute any Composio tool
+
+The universal executor lets you invoke any of 1000+ Composio tools directly, without a dedicated endpoint. Use the Composio action slug (e.g. `LINEAR_CREATE_LINEAR_ISSUE`) as the `action`.
+
+<ParamField body="action" type="string" required>
+  Composio action slug. Max 200 characters. Examples: `LINEAR_CREATE_LINEAR_ISSUE`, `SLACK_SEND_MESSAGE`, `GITHUB_CREATE_ISSUE`.
+</ParamField>
+
+<ParamField body="arguments" type="object" required>
+  Arguments for the action. The required fields depend on the specific Composio action.
+</ParamField>
+
+<ParamField body="connected_account_id" type="string">
+  Composio connected-account ID to use. Pass `null` to use the user's default connected account for the toolkit.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/integrations/execute \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "LINEAR_CREATE_LINEAR_ISSUE",
+    "arguments": {
+      "title": "Implement auth module",
+      "team_id": "TEAM123"
+    },
+    "connected_account_id": null
+  }'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/integrations/execute",
+    headers={"Authorization": "Bearer <token>"},
+    json={
+        "action": "LINEAR_CREATE_LINEAR_ISSUE",
+        "arguments": {"title": "Implement auth module", "team_id": "TEAM123"},
+        "connected_account_id": None,
+    },
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "status": "completed",
+  "action": "LINEAR_CREATE_LINEAR_ISSUE",
+  "result": {
+    "id": "LIN-42",
+    "url": "https://linear.app/acme/issue/LIN-42"
+  }
+}
+```
+
+Returns `502` if Composio or the upstream service returns an error. The `detail` field includes the upstream error message.
+
+---
+
+## High-level action endpoints
+
+These endpoints wrap the most common Composio actions with typed request bodies. They are equivalent to calling `POST /integrations/execute` with the corresponding action slug.
+
+<AccordionGroup>
+  <Accordion title="Linear">
+    **Create an issue**
+
+    ```bash curl
+    curl -X POST https://api.manticscore.com/integrations/linear/issues \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"title": "Auth module", "team_id": "TEAM123", "description": "Implement JWT auth.", "priority": 2}'
+    ```
+
+    **List teams**
+
+    ```bash curl
+    curl "https://api.manticscore.com/integrations/linear/teams" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Accordion>
+  <Accordion title="Jira">
+    **Create an issue**
+
+    ```bash curl
+    curl -X POST https://api.manticscore.com/integrations/jira/issues \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"project_key": "ENG", "summary": "Auth module", "issue_type": "Task", "description": "Implement JWT auth."}'
+    ```
+
+    **List projects**
+
+    ```bash curl
+    curl "https://api.manticscore.com/integrations/jira/projects" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Accordion>
+  <Accordion title="Slack">
+    **Send a message**
+
+    ```bash curl
+    curl -X POST https://api.manticscore.com/integrations/slack/messages \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"channel": "C01234567", "text": "Research complete for AI expense tracker."}'
+    ```
+
+    **List channels**
+
+    ```bash curl
+    curl "https://api.manticscore.com/integrations/slack/channels" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Accordion>
+  <Accordion title="Notion">
+    **Create a page**
+
+    ```bash curl
+    curl -X POST https://api.manticscore.com/integrations/notion/pages \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{"parent_id": "abc123", "title": "AI Expense Tracker Research", "content": "## Market Overview\n..."}'
+    ```
+
+    **Search pages**
+
+    ```bash curl
+    curl "https://api.manticscore.com/integrations/notion/search?q=expense+tracker" \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Integration preferences
+
+Returns all integration preferences including connection status, defaults, config fields, agent capabilities, and discovered resources in a single call.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/integrations/preferences" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "integrations": [
+    {
+      "toolkit": "linear",
+      "name": "Linear",
+      "connected": true,
+      "defaults": {"team_id": "TEAM123"},
+      "config_fields": ["team_id", "project_id", "default_priority"],
+      "agent_capabilities": ["create_issue", "list_teams"],
+      "discovered_at": "2026-04-10T10:00:00Z",
+      "resources": {
+        "teams": [{"id": "TEAM123", "name": "Engineering"}]
+      }
+    }
+  ]
+}
+```

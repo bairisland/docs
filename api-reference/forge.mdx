@@ -1,0 +1,500 @@
+---
+title: "Forge: agentic coding tasks, runs, and pull requests"
+description: "Submit coding tasks, stream run events, approve or cancel runs, retry failures, and configure auto-retry for CI failures and review requests on open PRs."
+---
+
+Forge is ManticScore's agentic coding engine. You give it a natural language prompt and a GitHub repository; it plans the implementation, writes and validates code, and opens a pull request — all autonomously. You can run Forge directly via `POST /forge/tasks`, or trigger it from a build node via `POST /build-nodes/{node_id}/implement`. Once a PR is open, Forge polls for CI failures and review change requests and can auto-retry with failure context.
+
+## Run lifecycle
+
+A Forge run moves through a fixed sequence of statuses:
+
+```
+queued → submitted → planning → editing → validating
+  → awaiting_approval*  → creating_pr → completed
+```
+
+\* `awaiting_approval` only appears in `autonomous` mode. In `create_pr` mode the run goes directly from `validating` to `creating_pr`.
+
+Terminal statuses: `failed`, `cancelled`, `rejected`.
+
+---
+
+## POST /forge/tasks
+
+Submit a new coding task. Returns immediately with a `task_id` and `run_id`. Stream progress via `GET /forge/runs/{run_id}/events`.
+
+<Note>
+  Rate limit: **10 requests per minute**.
+</Note>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/forge/tasks \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Add rate limiting middleware to all /api/v1 routes using a sliding window algorithm. Limits: 100 req/min for authenticated users, 20 req/min for unauthenticated.",
+    "repository_name": "acme/loyalty-app",
+    "mode": "create_pr",
+    "project_id": "a1b2c3d4-0000-0000-0000-000000000001"
+  }'
+```
+
+```python Python
+import httpx
+
+response = httpx.post(
+    "https://api.manticscore.com/forge/tasks",
+    headers={"Authorization": f"Bearer {session_token}"},
+    json={
+        "prompt": "Add rate limiting middleware to all /api/v1 routes",
+        "repository_name": "acme/loyalty-app",
+        "mode": "create_pr",
+        "project_id": "a1b2c3d4-0000-0000-0000-000000000001",
+    },
+)
+data = response.json()
+run_id = data["run_id"]
+```
+
+</CodeGroup>
+
+<ParamField body="prompt" type="string" required>
+  Natural language description of the coding task. Maximum 5,000 characters. Be specific — include relevant constraints, existing patterns to follow, and files or modules to avoid touching.
+</ParamField>
+
+<ParamField body="repository_name" type="string" required>
+  Target GitHub repository in `owner/name` format. You must have push access to this repository.
+</ParamField>
+
+<ParamField body="mode" type="string" default="autonomous">
+  How Forge should complete the task:
+
+  - `"create_pr"` — plan, code, validate, and open a PR automatically
+  - `"autonomous"` — plan, code, validate, then pause at `awaiting_approval` for your review before creating the PR
+  - `"generate_patch"` — produce code edits without creating a PR
+  - `"analyze_only"` — produce a plan and analysis only, no code written
+</ParamField>
+
+<ParamField body="provider" type="string" default="anthropic">
+  LLM provider to use for the coding agent. Either `"anthropic"` or `"openai"`.
+</ParamField>
+
+<ParamField body="project_id" type="string | null">
+  UUID of a ManticScore project to associate this run with. Optional — useful for grouping runs in the dashboard.
+</ParamField>
+
+<ParamField body="constraints" type="string[]">
+  Additional constraints to enforce during code generation, applied on top of the prompt. For example: `["Do not modify existing tests", "All new functions must have JSDoc comments"]`.
+</ParamField>
+
+```json 201 response
+{
+  "task_id": "TASK_UUID",
+  "run_id": "RUN_UUID",
+  "status": "queued"
+}
+```
+
+<ResponseField name="task_id" type="string" required>
+  UUID of the underlying task. A task is the stable record — a run is one execution attempt. Retrying creates a new run from the same task.
+</ResponseField>
+
+<ResponseField name="run_id" type="string" required>
+  UUID of this execution run. Use this to stream events and manage approval.
+</ResponseField>
+
+| Status | Cause |
+|--------|-------|
+| `403` | Your account has no GitHub connection, or you do not have push access to the target repository |
+
+---
+
+## GET /forge/runs/{run_id}/events
+
+Stream run progress as NDJSON. Supports cursor-based replay for reconnection.
+
+<Note>
+  This endpoint uses **Stream** auth — the server extends your session TTL on connect.
+</Note>
+
+<CodeGroup>
+
+```bash curl
+curl -N "https://api.manticscore.com/forge/runs/RUN_ID/events?cursor=0" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+**Query parameters**
+
+<ParamField query="cursor" type="number" default="0">
+  Resume from this event sequence number. Pass the last `seq` you received to replay only missed events after a disconnect.
+</ParamField>
+
+**Event reference**
+
+Each line is: `{"v": 1, "event": "<type>", "data": {...}}`.
+
+<AccordionGroup>
+  <Accordion title="stream_start">
+    Emitted immediately on connect.
+
+    ```json
+    {"v": 1, "event": "stream_start", "data": {"request_id": "req_abc123"}}
+    ```
+  </Accordion>
+
+  <Accordion title="status_change">
+    Emitted each time the run transitions to a new status.
+
+    ```json
+    {"v": 1, "event": "status_change", "data": {"status": "planning"}}
+    ```
+
+    Use these events to track progress through the run lifecycle: `queued → submitted → planning → editing → validating → awaiting_approval → creating_pr → completed`.
+  </Accordion>
+
+  <Accordion title="plan">
+    Emitted once planning is complete. Contains the structured implementation plan Forge intends to execute.
+
+    ```json
+    {"v": 1, "event": "plan", "data": {"steps": [...], "files_to_edit": [...]}}
+    ```
+  </Accordion>
+
+  <Accordion title="diff">
+    Emitted after code edits are generated. Contains the code diff for the changes Forge produced.
+
+    ```json
+    {"v": 1, "event": "diff", "data": {"files": [...], "summary": "3 files changed"}}
+    ```
+  </Accordion>
+
+  <Accordion title="tool_call_failed">
+    Fired when a specific external tool call inside the run fails. Surfaces which tool broke so you can diagnose integration issues rather than seeing only a generic failure.
+
+    ```json
+    {"v": 1, "event": "tool_call_failed", "data": {"tool": "GITHUB_CREATE_BRANCH", "error": "Repository not found or insufficient permissions"}}
+    ```
+
+    <ResponseField name="tool" type="string">The Composio tool name that failed.</ResponseField>
+    <ResponseField name="error" type="string">The error message from the failed tool call.</ResponseField>
+  </Accordion>
+
+  <Accordion title="repair_cycle">
+    Emitted at the end of each cycle of the validator-driven repair loop. Reports how many error-level findings remained before and after the cycle so you can track repair progress.
+
+    ```json
+    {"v": 1, "event": "repair_cycle", "data": {"cycle": 1, "errors_before": 4, "errors_after": 1}}
+    ```
+
+    <ResponseField name="cycle" type="number">The repair cycle index (1-based).</ResponseField>
+    <ResponseField name="errors_before" type="number">Count of error-level findings entering this cycle.</ResponseField>
+    <ResponseField name="errors_after" type="number">Count of error-level findings remaining after the cycle ran.</ResponseField>
+  </Accordion>
+
+  <Accordion title="repair_stalled">
+    Emitted when a repair cycle finishes without reducing the error count — that is, the LLM rewrite produced output that did not actually fix anything (`errors_after >= errors_before`). Use this as a distinct signal from `repair_cycle` to warn users that a `[DRAFT]` PR likely still has the original validation failures and should be reviewed carefully rather than treated as a near-fix.
+
+    ```json
+    {"v": 1, "event": "repair_stalled", "data": {"cycle": 2, "errors_before": 3, "errors_after": 3, "regressed": false}}
+    ```
+
+    <ResponseField name="cycle" type="number">The repair cycle index (1-based) that stalled.</ResponseField>
+    <ResponseField name="errors_before" type="number">Count of error-level findings entering the stalled cycle.</ResponseField>
+    <ResponseField name="errors_after" type="number">Count of error-level findings after the stalled cycle.</ResponseField>
+    <ResponseField name="regressed" type="boolean">`true` when the cycle made things worse (`errors_after > errors_before`); `false` when it merely failed to make progress (`errors_after == errors_before`).</ResponseField>
+
+    <Note>
+      In addition to the stream event, the server fires an APNS push notification to every device registered for the user via [`POST /push-tokens`](/account/notifications). The push payload's `data` includes `{"type": "repair_stalled", "run_id": "<run_id>"}` so mobile clients can deep-link straight to the run detail screen. The push is best-effort — failures never block the run or the stream.
+    </Note>
+  </Accordion>
+
+  <Accordion title="error">
+    Signals a run-level failure.
+
+    ```json
+    {"v": 1, "event": "error", "data": {"code": "VALIDATION_FAILED", "message": "Generated code failed linting checks"}}
+    ```
+  </Accordion>
+
+  <Accordion title="done">
+    Always the final event on the stream.
+
+    ```json
+    {"v": 1, "event": "done", "data": {}}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## GET /forge/runs
+
+List your Forge runs, optionally filtered by status.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/forge/runs?status=awaiting_approval&limit=20" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+<ParamField query="status" type="string">
+  Filter to runs in this status. Valid values: `queued`, `submitted`, `planning`, `editing`, `validating`, `awaiting_approval`, `creating_pr`, `completed`, `failed`, `cancelled`, `rejected`.
+</ParamField>
+
+<ParamField query="limit" type="number" default="20">
+  Maximum results to return. Maximum value: 100.
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of results to skip for pagination.
+</ParamField>
+
+```json 200 response
+[
+  {
+    "id": "RUN_UUID",
+    "task_id": "TASK_UUID",
+    "repository_name": "acme/loyalty-app",
+    "prompt": "Add rate limiting middleware...",
+    "mode": "create_pr",
+    "status": "completed",
+    "branch_name": "forge/rate-limiting-abc123"
+  }
+]
+```
+
+---
+
+## GET /forge/runs/{run_id}
+
+Retrieve full details for a single run, including its step history and PR information.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/forge/runs/RUN_ID" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+The response is the full run object with a `steps` array detailing each pipeline stage and, when a PR has been created, a `pull_request` object with PR metadata.
+
+---
+
+## Approving, rejecting, and cancelling runs
+
+These three endpoints apply to runs in `autonomous` mode.
+
+<Tabs>
+  <Tab title="Approve">
+    When a run reaches `awaiting_approval`, call this endpoint to authorize PR creation.
+
+    <CodeGroup>
+
+    ```bash curl
+    curl -X POST "https://api.manticscore.com/forge/runs/RUN_ID/approve" \
+      -H "Authorization: Bearer <session_token>"
+    ```
+
+    </CodeGroup>
+
+    ```json 200 response
+    {"run_id": "RUN_UUID", "status": "creating_pr"}
+    ```
+
+    A `400` response means the run is not currently in `awaiting_approval` state.
+  </Tab>
+  <Tab title="Reject">
+    Reject the generated code. The run moves to `rejected` status. You can then retry with a refined prompt.
+
+    <CodeGroup>
+
+    ```bash curl
+    curl -X POST "https://api.manticscore.com/forge/runs/RUN_ID/reject" \
+      -H "Authorization: Bearer <session_token>"
+    ```
+
+    </CodeGroup>
+
+    ```json 200 response
+    {"run_id": "RUN_UUID", "status": "rejected"}
+    ```
+  </Tab>
+  <Tab title="Cancel">
+    Cancel a run that is in progress. The run moves to `cancelled` status.
+
+    <CodeGroup>
+
+    ```bash curl
+    curl -X POST "https://api.manticscore.com/forge/runs/RUN_ID/cancel" \
+      -H "Authorization: Bearer <session_token>"
+    ```
+
+    </CodeGroup>
+
+    ```json 200 response
+    {"run_id": "RUN_UUID", "status": "cancelled"}
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## POST /forge/runs/{run_id}/retry
+
+Create a new run from the same underlying task. Only available for runs in `failed`, `cancelled`, or `rejected` status.
+
+<Note>
+  Rate limit: **5 requests per minute**.
+</Note>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/forge/runs/RUN_ID/retry" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "run_id": "NEW_RUN_UUID",
+  "status": "queued"
+}
+```
+
+<Tip>
+  Retry creates a **new** run from the same task. The `run_id` in the response is different from the one you retried. Subscribe to `GET /forge/runs/{new_run_id}/events` to track the new attempt.
+</Tip>
+
+---
+
+## Pull requests
+
+<Note>
+  **Auto-append to the project brief on PR creation.** When a Forge run associated with a project opens a PR, the server appends a normalized progress entry to the project's most recent brief. If the project has no brief yet, one is bootstrapped from the latest research with `audience: "founder"` before the entry is added.
+
+  The progress entry is upserted into a `progress` section with shape `{title, items[]}` and is keyed on `pr_number`, so reposting the same PR is idempotent. Every successful append increments `brief.revision` and bumps `brief.updated_at`, and emits a `revision_updated` event on the [`brief` channel](/streaming/websocket). This step is best-effort; PR creation never fails because of it.
+</Note>
+
+<Note>
+  **Validation gate and draft PR fallback.** After code generation, Forge runs a deterministic validator on the proposed changes. If error-level findings are detected, the run enters a repair loop (up to two cycles) that summarizes the failures and rewrites only the failing files before re-validating. Each cycle emits a `repair_cycle` event with `errors_before` and `errors_after`; if a cycle finishes without reducing the error count, Forge additionally emits a `repair_stalled` event so clients can warn the user that the LLM did not actually fix the failures. If the run still has error-level findings after the repair budget is spent, Forge proceeds to PR creation but opens the PR as a **draft** with a `[AgentForge][DRAFT]` title prefix, so reviewers can see it needs human attention before merge. Runs that pass validation (with the repair loop or without one) open a normal, ready-for-review PR.
+</Note>
+
+### GET /forge/pulls/{run_id}
+
+Retrieve PR details for a completed run.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/forge/pulls/RUN_ID" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "PR_UUID",
+  "run_id": "RUN_UUID",
+  "repository_name": "acme/loyalty-app",
+  "pr_number": 42,
+  "pr_url": "https://github.com/acme/loyalty-app/pull/42"
+}
+```
+
+---
+
+### GET /forge/pulls/{pr_id}/reactions
+
+Retrieve the CI status, review state, and auto-retry configuration for a Forge PR. Forge polls open PRs every 5 minutes and can automatically retry runs when CI fails or a reviewer requests changes.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/forge/pulls/PR_ID/reactions" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "PR_UUID",
+  "ci_status": "failure",
+  "ci_failure_log": "Error: 3 tests failed\n  FAIL src/middleware/rate-limit.test.ts",
+  "review_status": null,
+  "review_comments": null,
+  "retry_count": 1,
+  "max_retries": 2,
+  "child_run_id": "CHILD_RUN_UUID",
+  "reaction_config": {
+    "auto_retry_ci": true,
+    "auto_retry_review": false
+  }
+}
+```
+
+<ResponseField name="ci_status" type="string | null">Current CI check status from GitHub. `null` if CI has not yet reported.</ResponseField>
+<ResponseField name="ci_failure_log" type="string | null">Truncated CI failure log used as context for auto-retries. `null` when CI is passing.</ResponseField>
+<ResponseField name="review_status" type="string | null">Latest review state from GitHub. `null` if no review has been submitted.</ResponseField>
+<ResponseField name="review_comments" type="string | null">Review comments used as context for auto-retries. `null` when no blocking review exists.</ResponseField>
+<ResponseField name="retry_count" type="number">Number of auto-retry attempts made so far for this PR.</ResponseField>
+<ResponseField name="max_retries" type="number">Maximum auto-retries allowed. Configurable via `PATCH /forge/pulls/{pr_id}/reactions`.</ResponseField>
+<ResponseField name="child_run_id" type="string | null">UUID of the most recent auto-generated retry run, if one exists.</ResponseField>
+<ResponseField name="reaction_config" type="object">
+  Auto-retry configuration.
+  <Expandable title="properties">
+    <ResponseField name="auto_retry_ci" type="boolean">When `true`, Forge automatically retries the run if CI fails, passing the failure log as context.</ResponseField>
+    <ResponseField name="auto_retry_review" type="boolean">When `true`, Forge automatically retries the run if a reviewer requests changes, passing the review comments as context.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### PATCH /forge/pulls/{pr_id}/reactions
+
+Configure auto-retry behavior for a specific PR.
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/forge/pulls/PR_ID/reactions" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"auto_retry_ci": true, "auto_retry_review": true, "max_retries": 3}'
+```
+
+</CodeGroup>
+
+<ParamField body="auto_retry_ci" type="boolean | null">
+  Enable or disable automatic retry on CI failure. Omit to leave unchanged.
+</ParamField>
+
+<ParamField body="auto_retry_review" type="boolean | null">
+  Enable or disable automatic retry when a reviewer requests changes. Omit to leave unchanged.
+</ParamField>
+
+<ParamField body="max_retries" type="number | null">
+  Maximum number of auto-retries to allow. Accepts `0`–`5`. Omit to leave unchanged.
+</ParamField>
+
+```json 200 response
+{"updated": true}
+```
+
+<Warning>
+  Auto-retry consumes Forge credits for each attempt. Set `max_retries` to a conservative value (2–3) to avoid unexpected credit usage on flaky CI.
+</Warning>

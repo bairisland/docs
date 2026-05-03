@@ -1,0 +1,285 @@
+---
+title: "Ship API — export build graphs and research to your tools"
+description: "Export build plans to Linear, Jira, Slack, Notion, or GitHub in one call. Share research to Slack, Notion, email, or a public link using discovered defaults."
+---
+
+The Ship API provides one-tap export endpoints that use your auto-discovered integration defaults so you don't have to pass configuration on every call. Ship a build graph to Linear and it bulk-creates issues for every node. Ship to GitHub and it kicks off a Forge agentic coding run. Share research to Slack and it posts a formatted summary to your configured channel. If you need to override a default for a specific call, pass the optional fields; otherwise the server uses whatever was discovered when you connected the toolkit.
+
+## Ship a build graph
+
+Exports the entire build plan to a connected integration. All optional fields fall back to auto-discovered defaults if omitted.
+
+<ParamField body="target" type="string" required>
+  The integration to ship to. One of: `linear`, `jira`, `slack`, `notion`, `github`.
+</ParamField>
+
+<ParamField body="team_id" type="string">
+  Linear team ID. Falls back to your configured Linear default if omitted.
+</ParamField>
+
+<ParamField body="project_key" type="string">
+  Jira project key (e.g. `ENG`). Falls back to your configured Jira default if omitted.
+</ParamField>
+
+<ParamField body="channel" type="string">
+  Slack channel ID. Falls back to your configured `builds_channel` default if omitted.
+</ParamField>
+
+<ParamField body="repo" type="string">
+  GitHub repository in `owner/repo` format. Falls back to your configured GitHub default if omitted. Required for `github` target.
+</ParamField>
+
+<ParamField body="top_level_only" type="boolean" default="false">
+  When `true`, only the root-level nodes are exported. Useful for creating high-level epics without sub-tasks.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl — ship to Linear
+curl -X POST "https://api.manticscore.com/build-graphs/5b2c8f3d-.../ship" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "linear"}'
+```
+
+```bash curl — ship to Slack with override
+curl -X POST "https://api.manticscore.com/build-graphs/5b2c8f3d-.../ship" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "slack", "channel": "C09876543"}'
+```
+
+```bash curl — ship to GitHub
+curl -X POST "https://api.manticscore.com/build-graphs/5b2c8f3d-.../ship" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "github", "repo": "acme/expense-tracker"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/build-graphs/5b2c8f3d-.../ship",
+    headers={"Authorization": "Bearer <token>"},
+    json={"target": "linear"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+### Responses by target
+
+<Tabs>
+  <Tab title="Linear / Jira">
+    ```json 200 response
+    {
+      "target": "linear",
+      "total": 12,
+      "created": 12,
+      "issues": [
+        {
+          "node_id": "n1a2b3c4-...",
+          "node": "Authentication module",
+          "effort": "medium",
+          "priority": 2
+        }
+      ]
+    }
+    ```
+
+    <ResponseField name="total" type="number">Total build nodes processed.</ResponseField>
+    <ResponseField name="created" type="number">Issues successfully created in the target system.</ResponseField>
+    <ResponseField name="issues" type="object[]">
+      <Expandable title="issue properties">
+        <ResponseField name="node_id" type="string">UUID of the build node.</ResponseField>
+        <ResponseField name="node" type="string">Node name as created in the target system.</ResponseField>
+        <ResponseField name="effort" type="string">Node effort estimate: `small`, `medium`, `large`, or `very_large`.</ResponseField>
+        <ResponseField name="priority" type="number">Priority value assigned to the created issue.</ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Tab>
+  <Tab title="Slack">
+    ```json 200 response
+    {
+      "target": "slack",
+      "sent": true,
+      "channel": "C01234567",
+      "format": "summary"
+    }
+    ```
+
+    <ResponseField name="sent" type="boolean">`true` if the message was delivered.</ResponseField>
+    <ResponseField name="channel" type="string">Channel ID the message was sent to.</ResponseField>
+    <ResponseField name="format" type="string">Message format used: `summary` or `detailed`.</ResponseField>
+  </Tab>
+  <Tab title="Notion">
+    ```json 200 response
+    {
+      "target": "notion",
+      "page": {
+        "id": "page_abc123",
+        "url": "https://notion.so/..."
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="GitHub">
+    ```json 200 response
+    {
+      "target": "github",
+      "run_id": "r7c3d1e9-...",
+      "repo": "acme/expense-tracker",
+      "status": "queued"
+    }
+    ```
+
+    The `github` target kicks off a Forge agentic coding run. Track progress by streaming `GET /forge/runs/{run_id}/events`.
+
+    <ResponseField name="run_id" type="string">UUID of the Forge run. Use this to subscribe to the event stream.</ResponseField>
+    <ResponseField name="status" type="string">Always `queued` — the run starts asynchronously.</ResponseField>
+  </Tab>
+</Tabs>
+
+<Warning>
+  Returns `400` if the target is not connected, no defaults are configured and the required field was not provided, or the target value is unrecognized. Connect the integration and configure its defaults before calling this endpoint.
+</Warning>
+
+---
+
+## Share research
+
+Exports a completed research job to Slack, Notion, or email. You can also create a public share link using `POST /research/{job_id}/share` with no body.
+
+<ParamField body="target" type="string" required>
+  Destination for the export: `slack`, `notion`, or `email`.
+</ParamField>
+
+<ParamField body="channel" type="string">
+  Slack channel ID. Falls back to your configured `research_channel` default. Required for `target: slack` if no default is set.
+</ParamField>
+
+<ParamField body="parent_id" type="string">
+  Notion parent page or database ID. Falls back to your configured `research_db_id` default. Required for `target: notion` if no default is set.
+</ParamField>
+
+<ParamField body="to" type="string">
+  Recipient email address. Required for `target: email`.
+</ParamField>
+
+<ParamField body="format" type="string">
+  Export format: `summary` or `detailed`. Falls back to your configured Slack format default. Defaults to `summary` if not set anywhere.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl — share to Slack
+curl -X POST "https://api.manticscore.com/research/7c3d1e9a-.../share" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "slack", "format": "detailed"}'
+```
+
+```bash curl — share to Notion
+curl -X POST "https://api.manticscore.com/research/7c3d1e9a-.../share" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "notion", "parent_id": "abc123"}'
+```
+
+```bash curl — share by email
+curl -X POST "https://api.manticscore.com/research/7c3d1e9a-.../share" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "email", "to": "cofounder@acme.com", "format": "summary"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/research/7c3d1e9a-.../share",
+    headers={"Authorization": "Bearer <token>"},
+    json={"target": "slack", "format": "detailed"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+### Responses by target
+
+<Tabs>
+  <Tab title="Slack">
+    ```json 200 response
+    {
+      "sent": true,
+      "channel": "C01234567"
+    }
+    ```
+  </Tab>
+  <Tab title="Notion">
+    ```json 200 response
+    {
+      "page": {
+        "id": "page_abc123",
+        "url": "https://notion.so/..."
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Email">
+    ```json 200 response
+    {
+      "sent": true,
+      "to": "cofounder@acme.com"
+    }
+    ```
+  </Tab>
+</Tabs>
+
+Returns `400` if the target is not connected or a required field is missing. Returns `404` if the research job is not found or has not completed yet.
+
+---
+
+## Create a public share link
+
+Publishes research as a public App Clip page and returns a shareable URL. Anyone with the link can view the research without logging in.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/research/7c3d1e9a-.../share" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "share_token": "tok_abc123...",
+  "share_url": "https://manticscore.com/clip/research-abc123"
+}
+```
+
+<ResponseField name="share_token" type="string">
+  Opaque token that identifies this share. Pass it to `DELETE /research/{job_id}/share` to revoke access.
+</ResponseField>
+
+<ResponseField name="share_url" type="string">
+  Public URL anyone can open to read the research. No authentication required.
+</ResponseField>
+
+<Note>
+  Only completed research can be shared. The server returns `400` if the job is still running or has failed.
+</Note>
+
+To revoke a public share link:
+
+```bash curl
+curl -X DELETE "https://api.manticscore.com/research/7c3d1e9a-.../share" \
+  -H "Authorization: Bearer <token>"
+```
+
+Returns `{"revoked": true}` on success.

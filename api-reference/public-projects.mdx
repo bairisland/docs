@@ -1,0 +1,122 @@
+---
+title: "Public projects API — read a published project"
+description: "Public, no-auth read of an opt-in published project by slug. Powers manticscore.com/p/{slug} and Twitter card previews."
+---
+
+A project becomes publicly readable only after its owner [publishes it](/api-reference/projects#publish-a-project). The public surface returns a filtered view of the project — header, idea, optional research summary, optional build plan, optional Forge PRs — gated by the owner's `public_options`. Unpublished or unknown slugs return `404`, so brute-forcing slugs cannot leak private projects.
+
+## Get a published project
+
+Returns the public-safe view of a project for the given slug.
+
+No authentication required.
+
+<ParamField path="slug" type="string" required>
+  Public project slug, of the form `kebab-title-XXXXXX` where `XXXXXX` is a 6-character salted hash.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/public/p/ai-expense-tracker-9f4e2a"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get("https://api.manticscore.com/public/p/ai-expense-tracker-9f4e2a")
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "project": {
+    "short_title": "AI Expense Tracker",
+    "description": "Automated receipt capture for freelancers.",
+    "status": "ready",
+    "published_at": "2026-04-19T11:30:00Z"
+  },
+  "slug": "ai-expense-tracker-9f4e2a",
+  "idea": {
+    "raw": "AI expense tracker for freelancers",
+    "one_liner": "Automated receipt capture for freelancers.",
+    "problem_statement": "Freelancers waste hours each month sorting receipts.",
+    "target_user": "Independent contractors and small agencies",
+    "product_type": "mobile_app"
+  },
+  "research": {
+    "top_competitors": [],
+    "features": [
+      {"name": "Receipt OCR", "category": "capture"}
+    ],
+    "white_spaces": [
+      {"name": "Crypto expense reporting", "category": "fintech"}
+    ]
+  },
+  "build_plan": {
+    "nodes_count": 12,
+    "expanded_count": 6
+  },
+  "forge_prs": [
+    {
+      "repo": "acme/expense-tracker",
+      "pr_number": 42,
+      "pr_url": "https://github.com/acme/expense-tracker/pull/42"
+    }
+  ],
+  "author_handle": "anon",
+  "cta": {
+    "label": "Process your own idea →",
+    "href": "/start"
+  }
+}
+```
+
+<ResponseField name="project" type="object" required>
+  Compact project header: `short_title`, `description`, `status`, `published_at`.
+</ResponseField>
+
+<ResponseField name="slug" type="string" required>
+  The public slug (equal to the path parameter).
+</ResponseField>
+
+<ResponseField name="idea" type="object">
+  Present when `public_options.show_idea` is `true` (default). Contains `raw`, `one_liner`, `problem_statement`, `target_user`, `product_type`.
+</ResponseField>
+
+<ResponseField name="research" type="object">
+  Present when `public_options.show_research_summary` is `true` (default). Contains:
+  <Expandable title="research fields">
+    <ResponseField name="top_competitors" type="object[]">
+      Top competitors (incumbents + emerging, up to 10 total). Empty array when `public_options.show_competitors` is `false`.
+    </ResponseField>
+    <ResponseField name="features" type="object[]">
+      Up to 10 features from the latest completed research run.
+    </ResponseField>
+    <ResponseField name="white_spaces" type="object[]">
+      Up to 5 identified white spaces from the latest completed research run.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="build_plan" type="object">
+  Present when `public_options.show_build_plan` is `true`. Contains `nodes_count` and `expanded_count`. The full build tree is never exposed publicly.
+</ResponseField>
+
+<ResponseField name="forge_prs" type="object[]">
+  Present when `public_options.show_forge_prs` is `true`. Up to 10 most recent Forge PRs scoped to this project. Each entry has `repo`, `pr_number`, `pr_url`.
+</ResponseField>
+
+<ResponseField name="author_handle" type="string" required>
+  Author credit. Either the literal string `anon` (default) or the profile name when the owner set `show_handle_or_anon` to `handle`.
+</ResponseField>
+
+<ResponseField name="cta" type="object" required>
+  Call-to-action object with `label` and `href` for the public page footer.
+</ResponseField>
+
+Responses include `Cache-Control: public, max-age=300, s-maxage=3600` — 5-minute browser cache, 1-hour shared cache.
+
+Returns `404` if the slug does not exist or points to a project where `is_public` is `false`.

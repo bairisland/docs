@@ -1,0 +1,907 @@
+---
+title: "MCP server — orchestrator over HTTP"
+description: "Connect MCP-compatible clients to the ManticScore orchestrator surface over HTTP using a per-user bearer token."
+---
+
+The ManticScore API exposes a [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server over HTTP at `/mcp`. MCP-compatible clients — like Claude Code, Claude Desktop, and any other agent that speaks the `mcp__http` transport — can connect to it to invoke orchestrator tools.
+
+The endpoint is gated by a per-user bearer token that you mint and manage from your account. It is **not** part of the user-facing API surface and does not accept Clerk JWTs or session tokens.
+
+<Note>
+  This endpoint uses a dedicated MCP bearer token, not the standard `Authorization` modes documented in the [overview](/api-reference/overview). Mint and revoke tokens via the [MCP token endpoints](/account/profile#manage-mcp-bearer-tokens) on your profile.
+</Note>
+
+## Endpoint
+
+`POST /mcp/` (and any sub-path under `/mcp/`) — speaks the MCP streamable HTTP transport. Point your MCP client at `https://api.manticscore.com/mcp/` and configure it to send the bearer token below on every request.
+
+## Authentication
+
+Every request to `/mcp/` must carry a bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer <mcp_token>
+```
+
+Tokens have the form `mcp_<48 url-safe chars>`. They are minted per user via `POST /profile/mcp/tokens` and resolved server-side to a `user_id` by SHA-256 hash lookup against the active token store. The hashed bearer is matched against `mc_user_mcp_tokens` rows where `revoked_at IS NULL`; on a hit, `last_used_at` is bumped fire-and-forget and the resolved `user_id` scopes every tool call (see [Per-user scoping](#per-user-scoping) below).
+
+A legacy single-secret admin path is preserved for system tooling: if the bearer matches `orchestrator_mcp_secret` (constant-time compare), the request runs in admin/system context with no `user_id` filter and tools see all rows.
+
+| Status | Condition |
+|--------|-----------|
+| `401 Unauthorized` | The `Authorization` header is missing or does not start with `Bearer `. |
+| `403 Forbidden` | The bearer token is not a valid active user token and does not match the admin secret. |
+| `503 Service Unavailable` | The MCP route is not configured (database pool unavailable). |
+
+<Warning>
+  Treat MCP bearer tokens like any other credential. The plaintext is returned exactly once at creation — store it securely. Revoke compromised tokens via `DELETE /profile/mcp/tokens/{token_id}`.
+</Warning>
+
+## Per-user scoping
+
+Tools that read or write user-scoped rows automatically filter by the `user_id` resolved from the bearer token:
+
+- **[`decision_log`](#decision-log)** and **[`pattern_store`](#pattern-store)** insert with the resolved `user_id`.
+- **[`decision_search`](#decision-search)** and **[`pattern_match`](#pattern-match)** filter results to the calling user's rows.
+- **[`task_create`](#task-create)** inserts with the resolved `user_id`. **[`task_list`](#task-list)**, **[`task_get`](#task-get)**, **[`task_update`](#task-update)**, **[`route_task`](#route-task)**, and **[`context_for_task`](#context-for-task)** verify task ownership before reading or mutating; cross-user task access returns an error.
+
+Stateless tools — [`select_model`](#select-model), [`list_agents`](#list-agents), [`get_agent`](#get-agent), [`orchestrator_classify`](#orchestrator-classify), [`orchestrator_reset_cache`](#orchestrator-reset-cache), and [`ping`](#ping) — are unchanged and do not depend on `user_id`.
+
+When the request authenticates via the admin fallback secret, `user_id` is `None` and tools see all rows regardless of owner.
+
+## Tools
+
+The MCP server advertises its tools via the standard MCP discovery flow. Your client will pick them up automatically once connected.
+
+### `ping`
+
+Health probe for the MCP transport. Returns the server identity and the current UTC timestamp. Use this to verify connectivity and authentication before invoking other tools.
+
+**Arguments:** none.
+
+```json Response
+{
+  "pong": true,
+  "server": "manticscore-orchestrator",
+  "ts": "2026-04-29T07:55:00.000000+00:00"
+}
+```
+
+<ResponseField name="pong" type="boolean">
+  Always `true` when the call succeeds.
+</ResponseField>
+
+<ResponseField name="server" type="string">
+  Server identity. Currently `manticscore-orchestrator`.
+</ResponseField>
+
+<ResponseField name="ts" type="string">
+  Current server time as an ISO 8601 timestamp in UTC.
+</ResponseField>
+
+### `decision_log`
+
+Append a decision to the orchestrator's decision log for future reference and learning. The row is embedded asynchronously after insert so the call is not blocked on the embedding round-trip; the embedded text is searchable via `decision_search` once embedding completes.
+
+<ParamField path="context" type="string" required>
+  The situation, observations, or inputs that motivated the decision.
+</ParamField>
+
+<ParamField path="decision" type="string" required>
+  The chosen action or conclusion.
+</ParamField>
+
+<ParamField path="task_id" type="string">
+  Optional UUID linking this decision back to an in-flight task or run.
+</ParamField>
+
+<ParamField path="outcome" type="string">
+  Optional retrospective outcome. Can be filled in later via an out-of-band update.
+</ParamField>
+
+<ParamField path="confidence" type="number">
+  Self-reported confidence of the deciding agent on a `0`–`1` scale.
+</ParamField>
+
+<ParamField path="tags" type="string[]">
+  Free-form categorization tags. Used as an any-match (overlap) filter by `decision_search`.
+</ParamField>
+
+```json Response
+{
+  "id": "f3a1d8b6-9b1c-4f2e-8a3a-2b9f1e7d4c10",
+  "user_id": null,
+  "task_id": null,
+  "context": "Two candidate retrieval strategies for stage 2 search",
+  "decision": "Cascade exa → mcp; fall back to jina if both fail",
+  "outcome": null,
+  "confidence": 0.7,
+  "tags": ["retrieval", "cascade"],
+  "created_at": "2026-04-29T08:30:00.000000+00:00"
+}
+```
+
+<ResponseField name="id" type="string">
+  UUID of the new decision row.
+</ResponseField>
+
+<ResponseField name="task_id" type="string | null">
+  UUID linking back to a task, if provided on log.
+</ResponseField>
+
+<ResponseField name="context" type="string">
+  The situation that motivated the decision, as supplied by the caller.
+</ResponseField>
+
+<ResponseField name="decision" type="string">
+  The chosen action, as supplied by the caller.
+</ResponseField>
+
+<ResponseField name="outcome" type="string | null">
+  Retrospective outcome, if any.
+</ResponseField>
+
+<ResponseField name="confidence" type="number | null">
+  Self-reported confidence on a `0`–`1` scale.
+</ResponseField>
+
+<ResponseField name="tags" type="string[]">
+  Categorization tags, defaulting to an empty list.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  Insert timestamp as an ISO 8601 string in UTC.
+</ResponseField>
+
+### `decision_search`
+
+Search past decisions by free-text query and optional tag filter. Tries semantic search first using OpenAI embeddings (`text-embedding-3-small`, 512-dim); falls back to a case-insensitive `ILIKE` over `context` and `decision` if the semantic search returns no rows or embeddings are unavailable. Returns matching decisions ordered by similarity (semantic) or recency (fallback).
+
+<ParamField path="query" type="string" required>
+  Natural-language query. Matched against the embedded `context` + `decision` text first, then ILIKE'd over the same fields as a fallback.
+</ParamField>
+
+<ParamField path="limit" type="integer" default="10">
+  Maximum number of decisions to return. Clamped to the range `1`–`50`.
+</ParamField>
+
+<ParamField path="tags" type="string[]">
+  Any-match (overlap) filter. A decision matches if at least one of its tags appears in this list.
+</ParamField>
+
+```json Response
+[
+  {
+    "id": "f3a1d8b6-9b1c-4f2e-8a3a-2b9f1e7d4c10",
+    "user_id": null,
+    "task_id": null,
+    "context": "Two candidate retrieval strategies for stage 2 search",
+    "decision": "Cascade exa → mcp; fall back to jina if both fail",
+    "outcome": null,
+    "confidence": 0.7,
+    "tags": ["retrieval", "cascade"],
+    "created_at": "2026-04-29T08:30:00.000000+00:00",
+    "similarity": 0.83
+  }
+]
+```
+
+<ResponseField name="similarity" type="number">
+  Cosine similarity in the range `0`–`1`, included only on rows returned via the semantic path. Absent on ILIKE-fallback results.
+</ResponseField>
+
+Each row also includes the same `id`, `task_id`, `context`, `decision`, `outcome`, `confidence`, `tags`, and `created_at` fields documented under [`decision_log`](#decision-log).
+
+### `pattern_store`
+
+Store a reusable pattern — a named bundle of `trigger_conditions` and `actions` — for later retrieval via `pattern_match`. Both `trigger_conditions` and `actions` are free-form JSON objects defined by the calling agent. The row is embedded asynchronously over `name + description` after insert so the call is not blocked on the embedding round-trip.
+
+<ParamField path="name" type="string" required>
+  Short, human-readable name for the pattern. Used as the primary text signal for retrieval.
+</ParamField>
+
+<ParamField path="trigger_conditions" type="object" required>
+  Free-form JSON describing when the pattern applies (e.g. matchers, predicates, situational tags). Stored as JSONB.
+</ParamField>
+
+<ParamField path="actions" type="object" required>
+  Free-form JSON describing what to do when the trigger fires (e.g. an action list, a tool plan). Stored as JSONB.
+</ParamField>
+
+<ParamField path="description" type="string">
+  Optional longer description. Concatenated with `name` to produce the embedded text used by `pattern_match`.
+</ParamField>
+
+```json Response
+{
+  "id": "8c2e1a44-3f02-4b1d-bd5e-9d4a3b2c8101",
+  "user_id": null,
+  "name": "Cascade retrieval on judge failure",
+  "description": "When the judge stage emits a failure event, fall back to mechanical ranking and continue.",
+  "trigger_conditions": {
+    "event": "stage:judge/failed"
+  },
+  "actions": {
+    "steps": ["use_mechanical_rank", "continue_to_analyze"]
+  },
+  "success_rate": 0,
+  "usage_count": 0,
+  "created_at": "2026-04-29T08:30:00.000000+00:00",
+  "updated_at": "2026-04-29T08:30:00.000000+00:00"
+}
+```
+
+<ResponseField name="id" type="string">
+  UUID of the new pattern row.
+</ResponseField>
+
+<ResponseField name="user_id" type="string | null">
+  Owning user, resolved from the MCP bearer token. `null` only when the request authenticated via the admin fallback secret (system context).
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Pattern name as supplied by the caller.
+</ResponseField>
+
+<ResponseField name="description" type="string | null">
+  Pattern description as supplied by the caller.
+</ResponseField>
+
+<ResponseField name="trigger_conditions" type="object">
+  JSON trigger conditions, returned as a parsed object.
+</ResponseField>
+
+<ResponseField name="actions" type="object">
+  JSON action plan, returned as a parsed object.
+</ResponseField>
+
+<ResponseField name="success_rate" type="number">
+  Running average of successful invocations on a `0`–`1` scale. Starts at `0` and is updated by `increment_usage` (server-side helper, not exposed as an MCP tool).
+</ResponseField>
+
+<ResponseField name="usage_count" type="integer">
+  Total number of times the pattern has been invoked. Starts at `0`.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  Insert timestamp as an ISO 8601 string in UTC.
+</ResponseField>
+
+<ResponseField name="updated_at" type="string">
+  Last-update timestamp as an ISO 8601 string in UTC. Equal to `created_at` on first insert.
+</ResponseField>
+
+### `pattern_match`
+
+Find patterns relevant to a given situation. Tries semantic search first using OpenAI embeddings (`text-embedding-3-small`, 512-dim) over the embedded `name + description` text; falls back to a case-insensitive `ILIKE` over `name` and `description` ranked by `success_rate` then `usage_count` if the semantic search returns no rows or embeddings are unavailable.
+
+<ParamField path="situation" type="string" required>
+  Natural-language description of the current situation. Matched against the embedded `name + description` text first, then ILIKE'd over the same fields as a fallback.
+</ParamField>
+
+<ParamField path="limit" type="integer" default="10">
+  Maximum number of patterns to return. Clamped to the range `1`–`50`.
+</ParamField>
+
+```json Response
+[
+  {
+    "id": "8c2e1a44-3f02-4b1d-bd5e-9d4a3b2c8101",
+    "user_id": null,
+    "name": "Cascade retrieval on judge failure",
+    "description": "When the judge stage emits a failure event, fall back to mechanical ranking and continue.",
+    "trigger_conditions": {
+      "event": "stage:judge/failed"
+    },
+    "actions": {
+      "steps": ["use_mechanical_rank", "continue_to_analyze"]
+    },
+    "success_rate": 0.82,
+    "usage_count": 17,
+    "created_at": "2026-04-29T08:30:00.000000+00:00",
+    "updated_at": "2026-04-29T08:30:00.000000+00:00",
+    "similarity": 0.79
+  }
+]
+```
+
+<ResponseField name="similarity" type="number">
+  Cosine similarity in the range `0`–`1`, included only on rows returned via the semantic path. Absent on ILIKE-fallback results.
+</ResponseField>
+
+Each row also includes the same `id`, `user_id`, `name`, `description`, `trigger_conditions`, `actions`, `success_rate`, `usage_count`, `created_at`, and `updated_at` fields documented under [`pattern_store`](#pattern-store).
+
+### `task_create`
+
+Create a new task in the orchestrator. The new row is inserted with `status = pending`, and the creation is recorded in the audit log as a transition from `null` to `pending`.
+
+<ParamField path="title" type="string" required>
+  Short, human-readable title for the task.
+</ParamField>
+
+<ParamField path="description" type="string">
+  Optional longer description of the task.
+</ParamField>
+
+<ParamField path="priority" type="string" default="medium">
+  One of `low`, `medium`, `high`, or `urgent`.
+</ParamField>
+
+<ParamField path="source_channel" type="string">
+  Optional label identifying where the task originated (e.g. `mcp`, `chat`, `inngest`). Used as the `actor` on the initial `null → pending` transition row when set; defaults to `mcp` if omitted.
+</ParamField>
+
+<ParamField path="assigned_agent" type="string">
+  Optional identifier of the agent responsible for the task.
+</ParamField>
+
+<ParamField path="parent_task_id" type="string">
+  Optional UUID of a parent task. The parent must exist; if the parent is later deleted, this field is set to `null` (`ON DELETE SET NULL`).
+</ParamField>
+
+<ParamField path="metadata" type="object">
+  Free-form JSON metadata. Stored as JSONB. Defaults to `{}`.
+</ParamField>
+
+```json Response
+{
+  "id": "5b2c0c4f-1a2e-4d63-9b1d-2c2f0a3a8b14",
+  "user_id": null,
+  "title": "Investigate stage-2 retrieval regression",
+  "description": "Recall dropped 8% on golden eval after the cascade rewrite.",
+  "status": "pending",
+  "priority": "high",
+  "source_channel": "mcp",
+  "assigned_agent": null,
+  "parent_task_id": null,
+  "metadata": {},
+  "created_at": "2026-04-29T08:30:00.000000+00:00",
+  "updated_at": "2026-04-29T08:30:00.000000+00:00",
+  "completed_at": null
+}
+```
+
+<ResponseField name="id" type="string">
+  UUID of the new task row.
+</ResponseField>
+
+<ResponseField name="user_id" type="string | null">
+  Owning user, resolved from the MCP bearer token. `null` only when the request authenticated via the admin fallback secret (system context).
+</ResponseField>
+
+<ResponseField name="title" type="string">
+  Task title as supplied by the caller.
+</ResponseField>
+
+<ResponseField name="description" type="string | null">
+  Task description as supplied by the caller.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  One of `pending`, `approved`, `in_progress`, `blocked`, `review`, `completed`, `failed`, or `cancelled`. Always `pending` immediately after `task_create`.
+</ResponseField>
+
+<ResponseField name="priority" type="string">
+  One of `low`, `medium`, `high`, or `urgent`.
+</ResponseField>
+
+<ResponseField name="source_channel" type="string | null">
+  Origin label as supplied by the caller.
+</ResponseField>
+
+<ResponseField name="assigned_agent" type="string | null">
+  Assigned agent identifier, if any.
+</ResponseField>
+
+<ResponseField name="parent_task_id" type="string | null">
+  Parent task UUID, if any.
+</ResponseField>
+
+<ResponseField name="metadata" type="object">
+  Task metadata as a parsed JSON object. Defaults to an empty object.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  Insert timestamp as an ISO 8601 string in UTC.
+</ResponseField>
+
+<ResponseField name="updated_at" type="string">
+  Last-update timestamp as an ISO 8601 string in UTC. Equal to `created_at` on first insert.
+</ResponseField>
+
+<ResponseField name="completed_at" type="string | null">
+  Set automatically when the task transitions to `completed`. `null` until then.
+</ResponseField>
+
+### `task_update`
+
+Update a task. Use this to change the status (via the state machine) and/or update non-status fields like title, description, priority, assigned agent, or metadata. Status changes and field changes can be combined in a single call.
+
+For status changes, prefer `action` over `status` — actions are validated against the state machine and produce clearer errors. The legal action and target-status pairs are:
+
+| Action | From | To |
+|--------|------|----|
+| `approve` | `pending` | `approved` |
+| `start` | `approved` | `in_progress` |
+| `block` | `in_progress` | `blocked` |
+| `unblock` | `blocked` | `in_progress` |
+| `submit` | `in_progress` | `review` |
+| `reject` | `review` | `in_progress` |
+| `complete` | `review` | `completed` |
+| `fail` | `in_progress` | `failed` |
+| `cancel` | `pending`, `approved`, `in_progress`, `blocked`, `review`, `failed` | `cancelled` |
+
+Illegal transitions raise an error listing the legal actions from the current state. Transitioning into `completed` automatically sets `completed_at`. Every transition appends a row to the task's audit log.
+
+<ParamField path="task_id" type="string" required>
+  UUID of the task to update.
+</ParamField>
+
+<ParamField path="status" type="string">
+  Target status. Validated against the state machine. Prefer `action` instead.
+</ParamField>
+
+<ParamField path="action" type="string">
+  State-machine action to apply: one of `approve`, `start`, `block`, `unblock`, `submit`, `reject`, `complete`, `fail`, or `cancel`.
+</ParamField>
+
+<ParamField path="title" type="string">
+  New title.
+</ParamField>
+
+<ParamField path="description" type="string">
+  New description.
+</ParamField>
+
+<ParamField path="priority" type="string">
+  New priority. One of `low`, `medium`, `high`, or `urgent`.
+</ParamField>
+
+<ParamField path="assigned_agent" type="string">
+  New assigned agent identifier.
+</ParamField>
+
+<ParamField path="metadata" type="object">
+  Free-form JSON metadata. **Merged** into the existing metadata using JSONB concat (`||`), not replaced — top-level keys present in the new object overwrite existing keys, and other keys are preserved.
+</ParamField>
+
+<ParamField path="reason" type="string">
+  Optional human-readable reason for the transition. Recorded on the audit row when a status change is applied.
+</ParamField>
+
+<ParamField path="actor" type="string">
+  Optional identifier of the actor performing the transition. Recorded on the audit row.
+</ParamField>
+
+The response is the updated task row, with the same shape as [`task_create`](#task-create).
+
+### `task_list`
+
+List tasks with optional filters. Returns rows newest-first by `created_at`.
+
+<ParamField path="status" type="string">
+  Filter by status. One of `pending`, `approved`, `in_progress`, `blocked`, `review`, `completed`, `failed`, or `cancelled`.
+</ParamField>
+
+<ParamField path="priority" type="string">
+  Filter by priority. One of `low`, `medium`, `high`, or `urgent`.
+</ParamField>
+
+<ParamField path="assigned_agent" type="string">
+  Filter by assigned agent identifier.
+</ParamField>
+
+<ParamField path="limit" type="integer" default="50">
+  Maximum number of tasks to return. Clamped to the range `1`–`200`.
+</ParamField>
+
+The response is an array of task rows, each with the same shape as [`task_create`](#task-create).
+
+### `task_get`
+
+Get a task with its full transition history and the list of valid next actions from its current state.
+
+<ParamField path="task_id" type="string" required>
+  UUID of the task to fetch.
+</ParamField>
+
+```json Response
+{
+  "task": {
+    "id": "5b2c0c4f-1a2e-4d63-9b1d-2c2f0a3a8b14",
+    "user_id": null,
+    "title": "Investigate stage-2 retrieval regression",
+    "description": "Recall dropped 8% on golden eval after the cascade rewrite.",
+    "status": "in_progress",
+    "priority": "high",
+    "source_channel": "mcp",
+    "assigned_agent": "agent.research",
+    "parent_task_id": null,
+    "metadata": {},
+    "created_at": "2026-04-29T08:30:00.000000+00:00",
+    "updated_at": "2026-04-29T09:05:00.000000+00:00",
+    "completed_at": null
+  },
+  "transitions": [
+    {
+      "id": "0c0a1f10-9e48-4f29-b4f2-3c1c4d2a8a01",
+      "task_id": "5b2c0c4f-1a2e-4d63-9b1d-2c2f0a3a8b14",
+      "from_status": null,
+      "to_status": "pending",
+      "reason": null,
+      "actor": "mcp",
+      "created_at": "2026-04-29T08:30:00.000000+00:00"
+    },
+    {
+      "id": "0c0a1f10-9e48-4f29-b4f2-3c1c4d2a8a02",
+      "task_id": "5b2c0c4f-1a2e-4d63-9b1d-2c2f0a3a8b14",
+      "from_status": "pending",
+      "to_status": "approved",
+      "reason": "scoped",
+      "actor": "agent.triage",
+      "created_at": "2026-04-29T08:45:00.000000+00:00"
+    },
+    {
+      "id": "0c0a1f10-9e48-4f29-b4f2-3c1c4d2a8a03",
+      "task_id": "5b2c0c4f-1a2e-4d63-9b1d-2c2f0a3a8b14",
+      "from_status": "approved",
+      "to_status": "in_progress",
+      "reason": null,
+      "actor": "agent.research",
+      "created_at": "2026-04-29T09:05:00.000000+00:00"
+    }
+  ],
+  "valid_actions": ["block", "submit", "fail", "cancel"]
+}
+```
+
+<ResponseField name="task" type="object">
+  The task row, with the same shape as the response from [`task_create`](#task-create).
+</ResponseField>
+
+<ResponseField name="transitions" type="object[]">
+  Audit log of every transition for this task, ordered oldest-first.
+</ResponseField>
+
+<ResponseField name="transitions[].id" type="string">
+  UUID of the transition row.
+</ResponseField>
+
+<ResponseField name="transitions[].task_id" type="string">
+  UUID of the task this transition belongs to.
+</ResponseField>
+
+<ResponseField name="transitions[].from_status" type="string | null">
+  Previous status. `null` for the initial creation row.
+</ResponseField>
+
+<ResponseField name="transitions[].to_status" type="string">
+  New status.
+</ResponseField>
+
+<ResponseField name="transitions[].reason" type="string | null">
+  Reason recorded with the transition, if any.
+</ResponseField>
+
+<ResponseField name="transitions[].actor" type="string | null">
+  Actor recorded with the transition, if any.
+</ResponseField>
+
+<ResponseField name="transitions[].created_at" type="string">
+  Transition timestamp as an ISO 8601 string in UTC.
+</ResponseField>
+
+<ResponseField name="valid_actions" type="string[]">
+  The state-machine actions that are legal from the task's current status. Empty when the task is in a terminal state (`completed`, `cancelled`).
+</ResponseField>
+
+### `context_for_task`
+
+Aggregate everything an agent needs to act on a task: the task itself, its transition history, related decisions, child tasks, matching patterns, and the list of valid next actions. Equivalent to combining [`task_get`](#task-get), [`decision_search`](#decision-search) (filtered by `task_id`), [`task_list`](#task-list) (filtered by parent), and [`pattern_match`](#pattern-match) (over the task title + description) into a single call.
+
+<ParamField path="task_id" type="string" required>
+  UUID of the task to gather context for.
+</ParamField>
+
+```json Response
+{
+  "task": { "...": "same shape as task_create response" },
+  "transitions": [],
+  "related_decisions": [],
+  "subtasks": [],
+  "matching_patterns": [],
+  "valid_actions": ["block", "submit", "fail", "cancel"]
+}
+```
+
+<ResponseField name="task" type="object">
+  The task row, with the same shape as the response from [`task_create`](#task-create).
+</ResponseField>
+
+<ResponseField name="transitions" type="object[]">
+  Audit log of every transition for this task, oldest-first. Same shape as `task_get.transitions`.
+</ResponseField>
+
+<ResponseField name="related_decisions" type="object[]">
+  Decisions that reference this `task_id`. Each row has the same shape as a [`decision_log`](#decision-log) response.
+</ResponseField>
+
+<ResponseField name="subtasks" type="object[]">
+  Tasks whose `parent_task_id` equals this task's `id`, newest-first, capped at 200. Each row has the same shape as a [`task_create`](#task-create) response.
+</ResponseField>
+
+<ResponseField name="matching_patterns" type="object[]">
+  Up to 10 patterns matched against the task's title and description via [`pattern_match`](#pattern-match). Empty if both fields are empty.
+</ResponseField>
+
+<ResponseField name="valid_actions" type="string[]">
+  The state-machine actions that are legal from the task's current status.
+</ResponseField>
+
+### `route_task`
+
+Analyze a task and recommend which agent + model should handle it. Routing is a pure, keyword-based capability score — no LLM call. By default, returns a recommendation only without mutating the task. If `assign` is `true`, also writes the routing result into the task's `metadata.routing`, sets `assigned_agent`, and appends a routing decision to the orchestrator's decision log via [`decision_log`](#decision-log).
+
+<ParamField path="task_id" type="string" required>
+  UUID of the task to route. The task must exist.
+</ParamField>
+
+<ParamField path="assign" type="boolean" default="false">
+  When `true`, applies the routing decision to the task: updates `assigned_agent`, merges a `routing` block into `metadata` (with `agent_id`, `model`, `confidence`, `reasoning`, `routed_at`), and writes a routing decision audit row tagged `routing`, `auto-assign`, and the agent id. When `false`, the task is left untouched.
+</ParamField>
+
+```json Response
+{
+  "routing": {
+    "agent": {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "description": "Full-featured coding agent — builds features, fixes bugs, manages repos",
+      "capabilities": ["code", "git", "testing", "deployment", "refactoring", "architecture"],
+      "model": "claude-opus-4-7",
+      "transport": "mcp-stdio",
+      "max_concurrent": 1,
+      "cost_tier": "high"
+    },
+    "model": "claude-opus-4-7",
+    "confidence": 0.74,
+    "reasoning": "Detected capabilities: code(3), api(1). Best match: Claude Code (score 35). Model: claude-opus-4-7. Priority: high. Source: chat",
+    "alternates": [
+      {
+        "agent_id": "api-agent",
+        "confidence": 0.42,
+        "reason": "Score 18: api"
+      }
+    ]
+  },
+  "task": {
+    "id": "5b2c0c4f-1a2e-4d63-9b1d-2c2f0a3a8b14",
+    "title": "Fix stage-2 retrieval regression in the API",
+    "status": "pending"
+  },
+  "action": "recommendation_only"
+}
+```
+
+<ResponseField name="routing" type="object">
+  Routing decision.
+</ResponseField>
+
+<ResponseField name="routing.agent" type="object">
+  The selected agent record from the registry. Same shape as a row from [`list_agents`](#list-agents).
+</ResponseField>
+
+<ResponseField name="routing.model" type="string">
+  Concrete Claude model id assigned to the task. Currently one of `claude-haiku-4-5`, `claude-sonnet-4-6`, or `claude-opus-4-7` — sourced from the agent's `model` field.
+</ResponseField>
+
+<ResponseField name="routing.confidence" type="number">
+  Self-reported routing confidence on a `0`–`1` scale, derived from the best-match capability score.
+</ResponseField>
+
+<ResponseField name="routing.reasoning" type="string">
+  Short human-readable explanation of why this agent was picked, including the detected capabilities, the winning score, the model, the task priority, and the source channel when set.
+</ResponseField>
+
+<ResponseField name="routing.alternates" type="object[]">
+  Up to three runner-up agents, ordered by score. Each entry has an `agent_id`, `confidence`, and `reason` describing the matched capabilities.
+</ResponseField>
+
+<ResponseField name="task" type="object">
+  When `assign=false`, a trimmed view of the task (`id`, `title`, `status`). When `assign=true`, the full updated task row with the same shape as the [`task_create`](#task-create) response, including the merged `metadata.routing` block.
+</ResponseField>
+
+<ResponseField name="action" type="string">
+  Either `recommendation_only` (when `assign=false`) or `assigned` (when `assign=true`).
+</ResponseField>
+
+### `select_model`
+
+Map a task complexity tier to a concrete Claude model id. Pure lookup — no agent registry interaction. Use this when an agent has already decided what kind of work it's doing and just needs a model name.
+
+<ParamField path="tier" type="string" required>
+  One of `fast`, `balanced`, or `powerful`. Unknown tiers raise an error.
+</ParamField>
+
+<ParamField path="context" type="string">
+  Optional free-text label (e.g. a task title or short description). Echoed back in the response for caller-side logging; not used to influence the choice.
+</ParamField>
+
+```json Response
+{
+  "tier": "balanced",
+  "model": "claude-sonnet-4-6",
+  "context": "summarize a research run",
+  "guidance": "Best for: general tasks, API calls, research, conversation. Cost-tier: Sonnet."
+}
+```
+
+<ResponseField name="tier" type="string">
+  The tier supplied by the caller, echoed back.
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  The concrete Claude model id for the tier. Mapping: `fast → claude-haiku-4-5`, `balanced → claude-sonnet-4-6`, `powerful → claude-opus-4-7`.
+</ResponseField>
+
+<ResponseField name="context" type="string | null">
+  The `context` argument as supplied, or `null` if omitted.
+</ResponseField>
+
+<ResponseField name="guidance" type="string">
+  Short usage guidance for the tier. Useful for prompts that surface "why this model".
+</ResponseField>
+
+### `list_agents`
+
+List every registered agent with its capabilities, transport, model, and cost tier. The registry is currently a static set of five agents (`claude-code`, `research-agent`, `triage-agent`, `api-agent`, `openclaw-discord`) — used by [`route_task`](#route-task) to decide where work goes.
+
+**Arguments:** none.
+
+```json Response
+[
+  {
+    "id": "claude-code",
+    "name": "Claude Code",
+    "description": "Full-featured coding agent — builds features, fixes bugs, manages repos",
+    "capabilities": ["code", "git", "testing", "deployment", "refactoring", "architecture"],
+    "model": "claude-opus-4-7",
+    "transport": "mcp-stdio",
+    "max_concurrent": 1,
+    "cost_tier": "high"
+  },
+  {
+    "id": "research-agent",
+    "name": "Research Agent",
+    "description": "Fast agent for web research, documentation lookup, and data gathering",
+    "capabilities": ["research", "web-search", "summarization", "data-extraction"],
+    "model": "claude-sonnet-4-6",
+    "transport": "mcp-http",
+    "max_concurrent": 3,
+    "cost_tier": "medium"
+  }
+]
+```
+
+<ResponseField name="id" type="string">
+  Stable agent identifier. Use this with [`get_agent`](#get-agent) and as the value of `assigned_agent` on tasks.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Human-readable agent name.
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Short description of what the agent is best at.
+</ResponseField>
+
+<ResponseField name="capabilities" type="string[]">
+  Capability tags used by the router for keyword-based scoring. Examples: `code`, `research`, `triage`, `api`, `discord`, `conversation`.
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  Default Claude model the agent runs on. One of `claude-haiku-4-5`, `claude-sonnet-4-6`, or `claude-opus-4-7`.
+</ResponseField>
+
+<ResponseField name="transport" type="string">
+  How the orchestrator reaches the agent. One of `mcp-stdio`, `mcp-http`, or `openclaw-agent`.
+</ResponseField>
+
+<ResponseField name="max_concurrent" type="integer">
+  Soft concurrency budget — the maximum number of in-flight runs the orchestrator will dispatch to this agent at once.
+</ResponseField>
+
+<ResponseField name="cost_tier" type="string">
+  One of `low`, `medium`, or `high`. Used by [`route_task`](#route-task) to bias toward cheaper agents on low-priority work and pricier agents on `urgent` / `high` priority work.
+</ResponseField>
+
+### `get_agent`
+
+Get the registry entry for a single agent by id.
+
+<ParamField path="agent_id" type="string" required>
+  The agent identifier (e.g. `claude-code`, `research-agent`, `triage-agent`, `api-agent`, `openclaw-discord`). Unknown ids raise an error.
+</ParamField>
+
+The response is a single agent row with the same shape as an entry returned by [`list_agents`](#list-agents).
+
+### `orchestrator_classify`
+
+Classify a task title (and optional description / project name) into a category and an actionability bucket using regex pattern matching. Pure function — does not create or modify any rows. Useful for triage flows that need to decide where a new task should land before calling [`task_create`](#task-create).
+
+<ParamField path="title" type="string" required>
+  Task title to classify.
+</ParamField>
+
+<ParamField path="description" type="string">
+  Optional longer description. Concatenated with `title` and `project` to form the matched text.
+</ParamField>
+
+<ParamField path="project" type="string">
+  Optional project name. Concatenated into the matched text and also used to disambiguate ties (e.g. project names containing `content`, `calendar`, `backlog`, or `goal` boost the corresponding category).
+</ParamField>
+
+```json Response
+{
+  "category": "engineering",
+  "actionability": "agent",
+  "confidence": 0.6,
+  "reason": "engineering(6), also: api(2)"
+}
+```
+
+<ResponseField name="category" type="string">
+  Best-fit category. One of `engineering`, `research`, `content`, `integration`, `personal`, `goal`, `read`, or `unknown` when nothing matches.
+</ResponseField>
+
+<ResponseField name="actionability" type="string">
+  Suggested handler bucket: `agent` (an autonomous agent can do it), `human` (needs a person), `hybrid` (agent drafts, human reviews), or `defer` (long-horizon goal — surface, don't action). Mapping: `engineering`/`research`/`integration → agent`, `personal → human`, `content`/`read`/`unknown → hybrid`, `goal → defer`.
+</ResponseField>
+
+<ResponseField name="confidence" type="number">
+  Self-reported classification confidence on a `0`–`1` scale, derived from the winning category's score.
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Short string showing the winning category and score plus up to three runners-up. Useful for debugging classification calls.
+</ResponseField>
+
+### `orchestrator_reset_cache`
+
+Clear the orchestrator's in-memory sync cache and return the number of keys that were cleared.
+
+<Note>
+  This is a legacy hook preserved for parity with the previous Node orchestrator's Asana polling loop. The polling loop is being replaced by Inngest workflows; today the cache is empty in steady state and this tool is effectively a no-op. Future Inngest workflows may write into the cache, at which point this becomes useful again.
+</Note>
+
+**Arguments:** none.
+
+```json Response
+{
+  "cleared_keys": 0
+}
+```
+
+<ResponseField name="cleared_keys" type="integer">
+  The number of cache entries that were dropped by this call.
+</ResponseField>
+
+## Connecting from Claude Code
+
+Mint a token from your profile (see [Manage MCP bearer tokens](/account/profile#manage-mcp-bearer-tokens)), then configure Claude Code (or any MCP HTTP client) with the endpoint URL and the plaintext token returned at creation. The exact configuration steps depend on your client; consult its documentation for the `mcp__http` transport.
+
+```json Example client config
+{
+  "mcpServers": {
+    "manticscore": {
+      "transport": "http",
+      "url": "https://api.manticscore.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer mcp_<your_token>"
+      }
+    }
+  }
+}
+```
+
+Once connected, run the `ping` tool to confirm the transport is healthy.

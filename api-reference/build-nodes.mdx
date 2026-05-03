@@ -1,0 +1,486 @@
+---
+title: "Build nodes: expand, assess, implement, and export"
+description: "Expand, assess, and update build nodes. Diff re-expansion revisions, suggest prerequisites, implement via Forge, and push to Linear, Jira, or Notion."
+---
+
+Build nodes are the individual work items inside a build graph. Each node represents a discrete piece of implementation work with a name, description, risk rating, and an AI-generated spec. Nodes start in a `collapsed` state and can be expanded into children on demand. You can assess the risk and effort of any node, update its status as you work through it, and kick off a Forge run to produce a pull request directly from the node's spec.
+
+## Node shape
+
+Every endpoint that returns node data uses this structure. Nested `children` contain nodes of the same shape.
+
+```json
+{
+  "id": "uuid",
+  "graph_id": "uuid",
+  "parent_id": "uuid|null",
+  "node_key": "auth.oauth",
+  "depth": 1,
+  "sort_order": 0,
+  "name": "OAuth integration",
+  "description": "Implement OAuth 2.0 login flow with PKCE",
+  "risk": "yellow",
+  "node_status": "collapsed",
+  "user_status": "pending",
+  "confidence": "medium",
+  "effort": "large",
+  "unknowns": ["Token refresh edge cases on mobile"],
+  "spec": {
+    "objective": "Allow users to sign in with Google and GitHub",
+    "constraints": ["Must not store raw tokens server-side"],
+    "acceptance_criteria": ["User can sign in with Google", "User can sign in with GitHub"],
+    "test_checklist": ["Test token expiry", "Test revoked token handling"],
+    "emitted_prompt": "Implement PKCE-based OAuth 2.0 ..."
+  },
+  "children": []
+}
+```
+
+<ResponseField name="id" type="string" required>UUID of the node.</ResponseField>
+<ResponseField name="graph_id" type="string" required>UUID of the containing build graph.</ResponseField>
+<ResponseField name="parent_id" type="string | null" required>UUID of the parent node, or `null` for root nodes.</ResponseField>
+<ResponseField name="node_key" type="string" required>Dot-notation path describing the node's position in the hierarchy, e.g. `"auth.oauth"`.</ResponseField>
+<ResponseField name="depth" type="number" required>Zero-indexed depth in the tree. Root nodes have `depth: 0`.</ResponseField>
+<ResponseField name="sort_order" type="number" required>Relative order among siblings. Lower values appear first.</ResponseField>
+<ResponseField name="risk" type="string" required>`"green"`, `"yellow"`, or `"red"` — AI-assessed implementation risk at creation time.</ResponseField>
+<ResponseField name="node_status" type="string" required>
+  Lifecycle state of the node:
+  - `"collapsed"` — has not been expanded yet
+  - `"expanding"` — expansion is in progress
+  - `"expanded"` — children have been generated
+  - `"leaf"` — terminal node, cannot be expanded further
+  - `"implementing"` — a Forge run is in progress for this node
+</ResponseField>
+<ResponseField name="user_status" type="string" required>`"pending"`, `"in_progress"`, `"done"`, or `"skipped"` — your manually tracked progress.</ResponseField>
+<ResponseField name="confidence" type="string | null">AI-assessed confidence after a risk assessment: `"low"`, `"medium"`, or `"high"`. `null` until assessed.</ResponseField>
+<ResponseField name="effort" type="string | null">AI-assessed effort after a risk assessment: `"small"`, `"medium"`, `"large"`, or `"very_large"`. `null` until assessed.</ResponseField>
+<ResponseField name="unknowns" type="string[] | null">Open questions or ambiguities the AI identified during risk assessment.</ResponseField>
+<ResponseField name="spec" type="object | null">
+  Detailed implementation spec, populated when the node is expanded.
+  <Expandable title="spec properties">
+    <ResponseField name="objective" type="string">What this node should accomplish.</ResponseField>
+    <ResponseField name="constraints" type="string[]">Non-negotiable constraints the implementation must satisfy.</ResponseField>
+    <ResponseField name="acceptance_criteria" type="string[]">Verifiable conditions that indicate the node is complete.</ResponseField>
+    <ResponseField name="test_checklist" type="string[]">Specific tests that should be written or run.</ResponseField>
+    <ResponseField name="emitted_prompt" type="string | null">The coding prompt used when kicking off a Forge implementation run for this node.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## POST /build-nodes/{node_id}/expand
+
+Expand a `collapsed` node into children. The expansion runs as a background task — listen to `GET /build-graphs/{graph_id}/events` to receive `expand_start` and `expand_done` events.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/build-nodes/NODE_ID/expand" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "node_id": "uuid",
+  "graph_id": "uuid",
+  "status": "expanding"
+}
+```
+
+| Status | Cause |
+|--------|-------|
+| `403` | The build graph does not belong to your account |
+| `409` | The node is already `expanded`, `expanding`, or is a `leaf` and cannot be expanded |
+
+<Note>
+  **Auto-suggested Forge cards on expand.** When expansion completes, the server scans the new leaf children and posts a `card.forge_ready` event to the project's most recent chat session for each child where `risk` is `green` or `low`, `effort` is `small`, and `confidence ≥ 0.7`. At most 3 cards are posted per expansion to bound fan-out. Each card carries the suggested repository, branch, and a 300-character preview of the node's `emitted_prompt`, plus a `Ship it` action that pre-fills [`start_implementation`](/api-reference/chat) with the node's spec. Cards are skipped silently when there is no GitHub connection, no default repository, no chat session, or an existing Forge run already covers the node.
+
+  Card payload shape:
+
+  ```json
+  {
+    "v": 1,
+    "event": "card.forge_ready",
+    "data": {
+      "node_id": "uuid",
+      "node_name": "Add password reset endpoint",
+      "suggested_repo": "acme/loyalty-app",
+      "suggested_branch": "main",
+      "risk": "low",
+      "effort": "small",
+      "emitted_prompt_preview": "Implement POST /auth/password-reset...",
+      "actions": [
+        {
+          "label": "Ship it",
+          "tool": "start_implementation",
+          "args": {
+            "node_id": "uuid",
+            "repository_name": "acme/loyalty-app",
+            "branch": "main"
+          }
+        }
+      ]
+    }
+  }
+  ```
+
+  Subscribe on the [`chat` channel](/streaming/websocket) for the project's active session to receive these cards. iOS clients must ignore unknown event types so older builds remain forward-compatible.
+</Note>
+
+---
+
+## POST /build-nodes/{node_id}/re-expand
+
+Re-run expansion for a node that was previously expanded. The old children are archived and a new revision is generated. Use this when you want a fresh decomposition of a node after updating your idea or constraints.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/build-nodes/NODE_ID/re-expand" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "node_id": "uuid",
+  "graph_id": "uuid",
+  "status": "expanding",
+  "revision": 2,
+  "previous_children_count": 5
+}
+```
+
+<ResponseField name="revision" type="number">The new revision number. Starts at 2 for the first re-expansion.</ResponseField>
+<ResponseField name="previous_children_count" type="number">How many children were archived from the previous revision. Use this to verify the diff via `GET /build-nodes/{node_id}/diff`.</ResponseField>
+
+---
+
+## POST /build-nodes/{node_id}/assess
+
+Run a synchronous LLM risk assessment on a node. This populates the `confidence`, `effort`, and `unknowns` fields on the node row and returns the results immediately.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/build-nodes/NODE_ID/assess" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "uuid",
+  "confidence": "medium",
+  "effort": "large",
+  "unknowns": [
+    "Token refresh behavior on iOS background state",
+    "Rate limits from upstream OAuth provider"
+  ]
+}
+```
+
+<ResponseField name="confidence" type="string">`"low"`, `"medium"`, or `"high"` — how confident the AI is in its implementation estimate.</ResponseField>
+<ResponseField name="effort" type="string">`"small"`, `"medium"`, or `"large"` — AI-estimated implementation effort.</ResponseField>
+<ResponseField name="unknowns" type="string[]">Open questions and ambiguities that could affect the estimate.</ResponseField>
+
+---
+
+## PATCH /build-nodes/{node_id}
+
+Update a node's tracking status, display order, name, or description. All fields are optional.
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/build-nodes/NODE_ID" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"user_status": "in_progress"}'
+```
+
+</CodeGroup>
+
+<ParamField body="user_status" type="string">
+  Your tracking status for this node. One of `"pending"`, `"in_progress"`, `"done"`, or `"skipped"`.
+</ParamField>
+
+<ParamField body="sort_order" type="number">
+  Position among siblings. Lower values appear first.
+</ParamField>
+
+<ParamField body="name" type="string">
+  Override the node name. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Override the node description. Maximum 5,000 characters.
+</ParamField>
+
+The response is the full updated node row.
+
+---
+
+## GET /build-nodes/{node_id}/diff
+
+Compare the current expansion revision to the previous one. Useful after a re-expand to see what changed.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/build-nodes/NODE_ID/diff" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response (diff available)
+{
+  "diff_available": true,
+  "current_revision": 2,
+  "previous_revision": 1,
+  "added": [
+    {"id": "uuid", "node_key": "auth.refresh", "name": "Token refresh handler"}
+  ],
+  "removed": [
+    {"id": "uuid", "node_key": "auth.legacy", "name": "Legacy session support"}
+  ],
+  "changed": [
+    {
+      "name": "OAuth integration",
+      "changes": {
+        "description": {
+          "old": "Implement OAuth login",
+          "new": "Implement PKCE-based OAuth 2.0 login with token rotation"
+        }
+      }
+    }
+  ],
+  "unchanged": 3,
+  "summary": "2 added, 1 removed, 1 changed, 3 unchanged"
+}
+```
+
+```json 200 response (no previous revision)
+{"diff_available": false, "reason": "No previous revision to compare against"}
+```
+
+<ResponseField name="diff_available" type="boolean" required>
+  `true` when a previous revision exists to compare against.
+</ResponseField>
+<ResponseField name="added" type="object[]">Nodes present in the current revision but not the previous one.</ResponseField>
+<ResponseField name="removed" type="object[]">Nodes present in the previous revision but not the current one.</ResponseField>
+<ResponseField name="changed" type="object[]">
+  Nodes that exist in both revisions but have field-level differences.
+  <Expandable title="changed object properties">
+    <ResponseField name="name" type="string">Node name (for identification).</ResponseField>
+    <ResponseField name="changes" type="object">Map of field name to `{"old": value, "new": value}`.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="unchanged" type="number">Count of nodes identical across both revisions.</ResponseField>
+<ResponseField name="summary" type="string">Human-readable diff summary.</ResponseField>
+
+---
+
+## POST /build-nodes/suggest-prerequisites
+
+Given a node, ask the AI to suggest prerequisite work items that should be completed before tackling this node. Useful for identifying infrastructure, data model changes, or security work that gates the node.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/build-nodes/suggest-prerequisites" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"node_id": "NODE_UUID"}'
+```
+
+</CodeGroup>
+
+<ParamField body="node_id" type="string" required>
+  UUID of the node for which to generate prerequisite suggestions.
+</ParamField>
+
+```json 200 response
+{
+  "suggestions": [
+    {
+      "title": "Set up database schema for OAuth tokens",
+      "reason": "The OAuth integration requires a table to store encrypted token pairs",
+      "priority": "critical",
+      "estimated_effort": "small",
+      "category": "data_model"
+    },
+    {
+      "title": "Configure PKCE secret storage",
+      "reason": "Code verifiers must be stored securely between the auth redirect and callback",
+      "priority": "high",
+      "estimated_effort": "small",
+      "category": "security"
+    }
+  ]
+}
+```
+
+<ResponseField name="suggestions" type="object[]">
+  <Expandable title="suggestion properties">
+    <ResponseField name="title" type="string">Short description of the prerequisite work item.</ResponseField>
+    <ResponseField name="reason" type="string">Why this prerequisite is needed before the target node.</ResponseField>
+    <ResponseField name="priority" type="string">`"critical"`, `"high"`, `"medium"`, or `"low"`.</ResponseField>
+    <ResponseField name="estimated_effort" type="string">`"small"`, `"medium"`, or `"large"`.</ResponseField>
+    <ResponseField name="category" type="string">One of `"infrastructure"`, `"data_model"`, `"integration"`, `"security"`, `"abstraction"`, or `"other"`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## POST /build-nodes/{node_id}/implement
+
+Kick off a Forge run that produces a pull request from this node's `emitted_prompt`. The node transitions to `implementing` status immediately. If you supply `notes`, ManticScore first refines the prompt using your guidance before handing off to Forge.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/build-nodes/NODE_ID/implement" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "acme/loyalty-app",
+    "branch": "feature/oauth-integration",
+    "mode": "create_pr",
+    "notes": "Use the existing AuthService interface — do not create a new service class"
+  }'
+```
+
+</CodeGroup>
+
+<ParamField body="repo" type="string" required>
+  Target GitHub repository in `owner/name` format. You must have push access to this repository.
+</ParamField>
+
+<ParamField body="branch" type="string | null">
+  Branch to base the implementation on. Defaults to the repository's default branch when `null`.
+</ParamField>
+
+<ParamField body="notes" type="string | null">
+  Optional guidance that Forge uses to refine the node's emitted prompt before coding begins. Use this to steer the implementation without editing the node spec directly.
+</ParamField>
+
+<ParamField body="mode" type="string" default="create_pr">
+  How Forge should handle the task:
+  - `"create_pr"` — generate code and open a PR automatically
+  - `"autonomous"` — generate code and pause for your approval before creating the PR
+  - `"generate_patch"` — produce code edits without creating a PR
+  - `"analyze_only"` — produce a plan without writing any code
+</ParamField>
+
+```json 200 response
+{
+  "node_id": "NODE_UUID",
+  "run_id": "FORGE_RUN_UUID",
+  "task_id": "FORGE_TASK_UUID",
+  "repo": "acme/loyalty-app",
+  "mode": "create_pr",
+  "status": "queued"
+}
+```
+
+<Tip>
+  Track the Forge run in real time via `GET /forge/runs/{run_id}/events`. See [Forge](/api-reference/forge) for the full event reference and approval flow.
+</Tip>
+
+---
+
+## POST /build-nodes/{node_id}/ticket
+
+Create a tracked issue in Linear or Jira from this node. ManticScore automatically maps the node's effort assessment to a priority and uses your saved integration defaults for team, project, and assignee.
+
+<CodeGroup>
+
+```bash curl (Linear)
+curl -X POST "https://api.manticscore.com/build-nodes/NODE_ID/ticket" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "linear"}'
+```
+
+```bash curl (Jira)
+curl -X POST "https://api.manticscore.com/build-nodes/NODE_ID/ticket" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "jira", "project_key": "ACME"}'
+```
+
+</CodeGroup>
+
+<ParamField body="target" type="string" required>
+  Issue tracker to create the ticket in. Either `"linear"` or `"jira"`.
+</ParamField>
+
+<ParamField body="team_id" type="string | null">
+  Linear team ID. Falls back to your saved Linear default when omitted.
+</ParamField>
+
+<ParamField body="project_key" type="string | null">
+  Jira project key. Falls back to your saved Jira default when omitted.
+</ParamField>
+
+<ParamField body="priority" type="number | null">
+  Explicit numeric priority override. When `null`, ManticScore maps the node's `effort` assessment to an appropriate priority automatically.
+</ParamField>
+
+```json 200 response
+{
+  "node_id": "NODE_UUID",
+  "target": "linear",
+  "issue": {
+    "id": "LIN-456",
+    "title": "OAuth integration",
+    "url": "https://linear.app/acme/issue/LIN-456"
+  }
+}
+```
+
+<Warning>
+  A `400` response means the target integration is not connected or has no default team or project configured. Connect the integration and set defaults at `PATCH /profile/integrations/{toolkit}/defaults` first.
+</Warning>
+
+---
+
+## POST /build-nodes/{node_id}/doc
+
+Export this node to Notion as a structured page containing the objective, acceptance criteria, test checklist, and implementation prompt.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/build-nodes/NODE_ID/doc" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "notion", "parent_id": "NOTION_PAGE_ID"}'
+```
+
+</CodeGroup>
+
+<ParamField body="target" type="string" default="notion">
+  Export destination. Currently only `"notion"` is supported.
+</ParamField>
+
+<ParamField body="parent_id" type="string | null">
+  Notion page or database ID to create the new page under. Uses your saved Notion default when `null`.
+</ParamField>
+
+```json 200 response
+{
+  "node_id": "NODE_UUID",
+  "target": "notion",
+  "page": {
+    "id": "notion_page_id",
+    "url": "https://notion.so/acme/oauth-integration-abc123"
+  }
+}
+```

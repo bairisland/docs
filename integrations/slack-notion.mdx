@@ -1,0 +1,276 @@
+---
+title: "Slack and Notion: share research and build plans instantly"
+description: "Connect Slack and Notion to export research summaries, competitive signals, and build plans to the right channels and pages without leaving ManticScore."
+---
+
+ManticScore integrates with Slack and Notion so your research and build output reaches your team automatically. You can post a research summary to a Slack channel the moment analysis completes, export a build plan as a structured Notion page, or configure per-channel routing for different types of ManticScore events. Both integrations support one-tap export and event-driven automations.
+
+## Connecting
+
+<Tabs>
+  <Tab title="Slack">
+
+Connect Slack through the Composio OAuth flow:
+
+```bash
+curl -X POST https://api.manticscore.com/profile/integrations/slack/connect \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "url": "https://composio.dev/oauth/slack/...",
+  "toolkit": "slack"
+}
+```
+
+Open the URL in a browser and authorize ManticScore. Slack auto-discovers your workspace channels.
+
+### Configure defaults
+
+Slack supports routing different ManticScore events to different channels. Set them once and every export goes to the right place automatically.
+
+```bash
+curl -X PATCH https://api.manticscore.com/profile/integrations/slack/defaults \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel_id": "C1234",
+    "channel_name": "product",
+    "research_channel": "C5678",
+    "builds_channel": "C9012",
+    "signals_channel": "C3456",
+    "format": "summary",
+    "notify_on_research": true,
+    "notify_on_build": true,
+    "notify_on_signal": true
+  }'
+```
+
+| Field | Description |
+|---|---|
+| `channel_id` / `channel_name` | Default channel for all exports |
+| `research_channel` | Override channel for research shares |
+| `builds_channel` | Override channel for build plan exports |
+| `signals_channel` | Override channel for competitive signal alerts |
+| `format` | Message format: `summary` (brief) or `detailed` (full breakdown) |
+| `notify_on_research` | Auto-post when research completes |
+| `notify_on_build` | Auto-post when a build graph is ready |
+| `notify_on_signal` | Auto-post when a new signal is detected |
+
+### List channels
+
+```bash
+curl https://api.manticscore.com/integrations/slack/channels \
+  -H "Authorization: Bearer <token>"
+```
+
+### Post a message
+
+```bash
+curl -X POST https://api.manticscore.com/integrations/slack/messages \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel": "C1234",
+    "text": "Research for *Acme payments app* is ready."
+  }'
+```
+
+  </Tab>
+  <Tab title="Notion">
+
+Connect Notion through the Composio OAuth flow:
+
+```bash
+curl -X POST https://api.manticscore.com/profile/integrations/notion/connect \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "url": "https://composio.dev/oauth/notion/...",
+  "toolkit": "notion"
+}
+```
+
+Open the URL in a browser and authorize ManticScore. Notion auto-discovers your top-level pages and databases.
+
+### Configure defaults
+
+```bash
+curl -X PATCH https://api.manticscore.com/profile/integrations/notion/defaults \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parent_id": "page-uuid",
+    "parent_title": "Product Research",
+    "research_db_id": "db-uuid-1",
+    "build_plan_db_id": "db-uuid-2"
+  }'
+```
+
+| Field | Description |
+|---|---|
+| `parent_id` | Default parent page for new Notion exports |
+| `parent_title` | Human-readable label for the parent page |
+| `research_db_id` | Notion database to store research exports |
+| `build_plan_db_id` | Notion database to store build plan exports |
+
+### Search Notion
+
+```bash
+curl "https://api.manticscore.com/integrations/notion/search?q=product+research" \
+  -H "Authorization: Bearer <token>"
+```
+
+### Create a page
+
+```bash
+curl -X POST https://api.manticscore.com/integrations/notion/pages \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parent_id": "page-uuid",
+    "title": "Payments app build plan",
+    "content": "## Overview\nThis plan covers authentication, billing, and reporting."
+  }'
+```
+
+  </Tab>
+</Tabs>
+
+## Sharing research
+
+Use `POST /research/{job_id}/share` to export completed research to Slack, Notion, or email in one call.
+
+<Tabs>
+  <Tab title="Share to Slack">
+
+```bash
+curl -X POST https://api.manticscore.com/research/job-uuid/share \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "slack",
+    "channel": "C1234",
+    "format": "summary"
+  }'
+```
+
+```json
+{
+  "sent": true,
+  "channel": "C1234"
+}
+```
+
+Omit `channel` to use your configured default. Set `format` to `detailed` for the full research breakdown.
+
+  </Tab>
+  <Tab title="Export to Notion">
+
+```bash
+curl -X POST https://api.manticscore.com/research/job-uuid/share \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "notion",
+    "parent_id": "page-uuid"
+  }'
+```
+
+```json
+{
+  "page": {
+    "id": "notion-page-uuid",
+    "url": "https://www.notion.so/notion-page-uuid"
+  }
+}
+```
+
+Omit `parent_id` to use your configured default.
+
+  </Tab>
+</Tabs>
+
+## Shipping a build plan
+
+Use `POST /build-graphs/{graph_id}/ship` to export an entire build graph to Slack or Notion.
+
+<Tabs>
+  <Tab title="Ship to Slack">
+
+```bash
+curl -X POST https://api.manticscore.com/build-graphs/graph-uuid/ship \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "target": "slack" }'
+```
+
+```json
+{
+  "target": "slack",
+  "sent": true,
+  "channel": "C9012",
+  "format": "summary"
+}
+```
+
+ManticScore uses your configured `builds_channel` and `format` defaults. Pass `channel` and `format` in the request body to override them.
+
+  </Tab>
+  <Tab title="Ship to Notion">
+
+```bash
+curl -X POST https://api.manticscore.com/build-graphs/graph-uuid/ship \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "target": "notion" }'
+```
+
+```json
+{
+  "target": "notion",
+  "page": {
+    "id": "notion-page-uuid",
+    "url": "https://www.notion.so/notion-page-uuid"
+  }
+}
+```
+
+  </Tab>
+</Tabs>
+
+## Exporting a single build node to Notion
+
+You can export one build node as a structured Notion page with its objective, acceptance criteria, and test checklist.
+
+```bash
+curl -X POST https://api.manticscore.com/build-nodes/node-uuid/doc \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "notion",
+    "parent_id": "page-uuid"
+  }'
+```
+
+```json
+{
+  "node_id": "node-uuid",
+  "target": "notion",
+  "page": {
+    "id": "notion-page-uuid",
+    "url": "https://www.notion.so/notion-page-uuid"
+  }
+}
+```
+
+<Tip>
+Omit `parent_id` to use your configured Notion default page. ManticScore structures the exported page with sections for the node's objective, constraints, acceptance criteria, and test checklist.
+</Tip>
+
+<Note>
+Both `/research/{id}/share` and `/build-graphs/{id}/ship` return `400` if the target integration is not connected, or if a required field (such as a channel or parent page) is missing from both the request and your saved defaults.
+</Note>

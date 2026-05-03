@@ -1,0 +1,315 @@
+---
+title: "Automations API — event-driven workflow rules"
+description: "Create trigger-action rules for ManticScore events. Supports Slack, Linear, Jira, Notion, Gmail, and Composio tools via template variables and the executor."
+---
+
+Automations let you wire ManticScore events to external actions without writing code. Each automation has a trigger — something that happened inside ManticScore — and an action, which is something to do in a connected integration. When research finishes, post a Slack summary. When a signal is detected, create a Linear issue. When a Forge PR is created, send an email. You can use shorthand actions for common tasks or the `composio.execute` action to invoke any of 1000+ Composio tools with templated arguments.
+
+## List automations
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/automations" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "automations": [
+    {
+      "id": "a1b2c3d4-...",
+      "trigger": "research_completed",
+      "action": "slack.post",
+      "toolkit": "slack",
+      "config": {
+        "channel": "C01234567",
+        "format": "summary"
+      },
+      "enabled": true,
+      "created_at": "2026-04-10T10:00:00Z",
+      "updated_at": "2026-04-10T10:00:00Z"
+    }
+  ]
+}
+```
+
+<ResponseField name="automations" type="object[]">
+  <Expandable title="automation properties">
+    <ResponseField name="id" type="string">Automation UUID.</ResponseField>
+    <ResponseField name="trigger" type="string">Event that fires this automation.</ResponseField>
+    <ResponseField name="action" type="string">Action to execute when the trigger fires.</ResponseField>
+    <ResponseField name="toolkit" type="string">Integration toolkit the action runs through.</ResponseField>
+    <ResponseField name="config" type="object">Toolkit-specific configuration for the action.</ResponseField>
+    <ResponseField name="enabled" type="boolean">Whether the automation is active.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+## Create an automation
+
+<ParamField body="trigger" type="string" required>
+  The ManticScore event that fires this automation. One of:
+
+  - `research_completed` — a market or feature research run finishes
+  - `build_graph_completed` — a build graph is ready
+  - `signal_detected` — a new competitive signal is detected
+  - `forge_pr_created` — a Forge coding run creates a GitHub PR
+  - `brief_ready` — a product brief finishes generating
+</ParamField>
+
+<ParamField body="action" type="string" required>
+  What to do when the trigger fires. Shorthand actions:
+
+  - `slack.post` — post a message to a Slack channel
+  - `linear.create_issues` — create Linear issues from build nodes
+  - `jira.create_issues` — create Jira issues from build nodes
+  - `notion.export` — export content to a Notion page
+  - `gmail.send` — send an email
+  - `apns.push` — send a user-visible push notification to your iOS devices, with template-substituted `title` and `body`
+  - `apns.push_silent` — send a background wake push to your iOS devices; the runner auto-augments the payload from the triggering event context
+  - `composio.execute` — run any Composio tool (see below)
+</ParamField>
+
+<ParamField body="toolkit" type="string" required>
+  The integration toolkit for this action: `slack`, `linear`, `jira`, `notion`, `gmail`, `apns`, or `github`.
+</ParamField>
+
+<ParamField body="config" type="object" required>
+  Toolkit-specific configuration. For shorthand actions, supply channel IDs, team IDs, etc. For `composio.execute`, supply `tool_slug` and `arguments` with template variables.
+</ParamField>
+
+<ParamField body="enabled" type="boolean" default="true">
+  Whether this automation is active immediately on creation.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl — Slack notification on research
+curl -X POST https://api.manticscore.com/automations \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "trigger": "research_completed",
+    "action": "slack.post",
+    "toolkit": "slack",
+    "config": {"channel": "C01234567", "format": "summary"},
+    "enabled": true
+  }'
+```
+
+```bash curl — Composio executor
+curl -X POST https://api.manticscore.com/automations \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "trigger": "signal_detected",
+    "action": "composio.execute",
+    "toolkit": "linear",
+    "config": {
+      "tool_slug": "LINEAR_CREATE_LINEAR_ISSUE",
+      "arguments": {
+        "title": "Signal: {{signal.company_name}}",
+        "team_id": "TEAM123"
+      }
+    },
+    "enabled": true
+  }'
+```
+
+```bash curl — APNS push to iOS
+curl -X POST https://api.manticscore.com/automations \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "trigger": "signal_detected",
+    "action": "apns.push",
+    "toolkit": "apns",
+    "config": {
+      "title": "New signal: {{signal.company_name}}",
+      "body": "{{signal.title}}"
+    },
+    "enabled": true
+  }'
+```
+
+</CodeGroup>
+
+```json 201 response
+{
+  "id": "a1b2c3d4-...",
+  "trigger": "research_completed",
+  "action": "slack.post",
+  "toolkit": "slack",
+  "config": {"channel": "C01234567", "format": "summary"},
+  "enabled": true,
+  "created_at": "2026-04-18T10:00:00Z",
+  "updated_at": "2026-04-18T10:00:00Z"
+}
+```
+
+### Template variables for composio.execute
+
+When using `composio.execute`, your `arguments` values can include `{{...}}` template variables. The automation runner substitutes these with values from the triggering event at runtime.
+
+| Variable | Available on trigger | Value |
+|----------|---------------------|-------|
+| `{{research.idea}}` | `research_completed` | The product idea text. |
+| `{{build.title}}` | `build_graph_completed` | Title of the completed build graph. |
+| `{{signal.company_name}}` | `signal_detected` | Display name of the company that generated the signal. |
+| `{{signal.title}}` | `signal_detected` | Short headline of the signal. |
+| `{{signal.summary}}` | `signal_detected` | One-paragraph signal summary. |
+
+<Tip>
+  Combine template variables with any Composio action slug to build custom automation flows — for example, creating a Jira ticket with the signal summary in the description, or posting a Notion page with the build graph title.
+</Tip>
+
+### APNS push actions
+
+`apns.push` and `apns.push_silent` deliver to all push tokens registered for the authenticated user via [`POST /push-tokens`](/api-reference/overview). Both actions ride the same retry and durability path as `slack.post` and `linear.create_issues` — APNS is a first-class action substrate, not a side path.
+
+<ParamField body="config.title" type="string">
+  User-visible alert title for `apns.push`. Supports the same `{{...}}` template variables as `composio.execute`.
+</ParamField>
+
+<ParamField body="config.body" type="string">
+  User-visible alert body for `apns.push`. Supports `{{...}}` template variables.
+</ParamField>
+
+<Note>
+  `apns.push_silent` does not take a `title` or `body`. The runner auto-augments a background-wake payload from the triggering event context, which iOS clients can use to refresh state without showing a notification.
+</Note>
+
+---
+
+## Update an automation
+
+Accepts any subset of fields. This is a sparse merge — only the fields you provide are changed. To update a single key inside `config`, send just that key inside the `config` object.
+
+<ParamField body="trigger" type="string">New trigger event.</ParamField>
+<ParamField body="action" type="string">New action.</ParamField>
+<ParamField body="toolkit" type="string">New toolkit.</ParamField>
+<ParamField body="config" type="object">Config fields to merge. Keys not provided are preserved.</ParamField>
+<ParamField body="enabled" type="boolean">Enable or disable the automation.</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/automations/a1b2c3d4-..." \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+```
+
+</CodeGroup>
+
+Returns the full updated automation row on `200`. Returns `400` if no fields are provided.
+
+---
+
+## Delete an automation
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE "https://api.manticscore.com/automations/a1b2c3d4-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+Returns `204 No Content` on success.
+
+---
+
+## Agent autonomy
+
+Control how much latitude the AI agent has when taking actions on your behalf. Autonomy settings apply across automations and any proactive agent actions in the chat.
+
+<ParamField body="autonomy_level" type="string">
+  One of:
+  - `suggest` — the agent proposes an action and waits for your tap to confirm
+  - `confirm` — the agent shows a confirmation prompt before executing
+  - `auto` — the agent acts immediately without asking
+</ParamField>
+
+<ParamField body="auto_actions" type="string[]">
+  List of specific actions the agent can take in `auto` mode even if `autonomy_level` is `suggest` or `confirm`. Supported values: `slack.post`, `notion.export`, `linear.create_issues`, `jira.create_issues`, `gmail.send`, `apns.push`, `apns.push_silent`, `github.create_pr`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH https://api.manticscore.com/profile/agent-config \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "autonomy_level": "confirm",
+    "auto_actions": ["slack.post", "notion.export"]
+  }'
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "autonomy_level": "confirm",
+  "auto_actions": ["slack.post", "notion.export"]
+}
+```
+
+Returns the full `agent_config` object on `200`. Returns `422` if `autonomy_level` is not one of the valid values.
+
+<Note>
+  `auto_actions` overrides `autonomy_level` for the listed actions. In the example above, Slack posts and Notion exports happen automatically even though the global level is `confirm`.
+</Note>
+
+---
+
+## Spawned agents
+
+Spawned agents are open-ended, goal-driven automations the chat agent creates inline via the [`spawn_agent` tool](/api-reference/chat#built-in-agent-tools). They live in the same automations table and are returned alongside trigger-action automations from `GET /automations` — you can tell them apart by inspecting the `action` field (`agent.run`) and the agent-specific columns described below.
+
+<ResponseField name="goal" type="string">
+  Natural-language description of what the agent should do on each run. The agent re-reads this prompt every time it fires and uses Composio to discover whichever tools it needs. Example: `Every weekday at 9am, summarize Linear issues created the day before and post to #engineering on Slack.`
+</ResponseField>
+
+<ResponseField name="schedule_cron" type="string">
+  When the agent runs. One of:
+
+  - A standard 5-field cron expression — for example `0 9 * * 1-5` (every weekday at 9am).
+  - An ISO 8601 interval — for example `PT1H` (every hour).
+  - An event sentinel — `on:research_completed`, `on:signal_detected`, `on:forge_pr_created`, `on:build_graph_completed`, or `on:brief_ready`.
+  - `null` for one-shot agents that fire once and disable themselves.
+</ResponseField>
+
+<ResponseField name="next_run_at" type="string">
+  ISO 8601 timestamp of the next scheduled run, computed from `schedule_cron` after each successful execution.
+</ResponseField>
+
+<ResponseField name="last_run_at" type="string">
+  ISO 8601 timestamp of the most recent execution, or `null` if the agent has not yet fired.
+</ResponseField>
+
+<ResponseField name="last_status" type="string">
+  Outcome of the most recent run. Common values: `completed`, `failed`, `skipped`.
+</ResponseField>
+
+<ResponseField name="run_history" type="object[]">
+  Bounded log of recent runs (most recent first). Each entry includes a timestamp, status, and a short summary of what the agent did or why it failed.
+</ResponseField>
+
+<ResponseField name="integration_overrides" type="object">
+  Optional per-agent overrides for [integration preferences](/api-reference/integrations) — for example, force a specific Slack channel for this agent without changing the global default.
+</ResponseField>
+
+<ResponseField name="spawned_in_session_id" type="string">
+  Chat session UUID the agent was spawned from. Cron-triggered runs publish their results back into this session so the user sees agent activity in the same thread.
+</ResponseField>
+
+<Note>
+  Spawned agents share the same automations row shape as trigger-action automations — `PATCH /automations/{id}` with `{"enabled": false}` pauses an agent, and `DELETE /automations/{id}` removes it permanently. The chat agent's [`update_agent` tool](/api-reference/chat#built-in-agent-tools) is a higher-level wrapper around the same endpoints that also accepts plain-language edit instructions.
+</Note>

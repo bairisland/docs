@@ -1,0 +1,247 @@
+---
+title: "Chat with an AI agent that knows your product context"
+description: "Chat with an AI that has full context of your research and build plans, and can discover and execute 1,000+ integration tools — GitHub, Linear, Slack, and more."
+---
+
+The Chat Agent is a conversational AI with full awareness of your product context. It knows your research, your build plans, and your connected integrations. In a single conversation you can ask it to look up existing research, run new market analysis, expand a build tree node, kick off a Forge coding run, create a Linear issue, or post to Slack — all through natural language. Each action it takes is reflected back to you in the stream as it happens.
+
+## What the agent can do
+
+The agent has access to a core set of ManticScore tools, plus any integration you've connected via Composio:
+
+**ManticScore tools:**
+
+| Tool | What it does |
+|---|---|
+| `query_research` | Look up and summarize your existing research |
+| `run_research` | Start a new market research job |
+| `expand_build_node` | Expand a collapsed node in your build graph |
+| `assess_node_risk` | Get a risk and effort assessment for a node |
+| `deep_dive_feature` | Run feature deep research on specific features |
+| `start_implementation` | Kick off a Forge coding run |
+
+**Composio tools (discovered at runtime):**
+
+The agent can discover and use any tool from your connected integrations — GitHub, Linear, Jira, Slack, Notion, Gmail, and 1,000+ more. It searches for the right tool, retrieves its schema, and calls it without you needing to configure anything beyond the initial connection.
+
+## Sending a message
+
+Chat uses streaming NDJSON. Your client sends the conversation history and receives a stream of events back.
+
+<ParamField body="messages" type="array" required>
+  Conversation history. Each message: `{"role": "user" | "assistant", "content": "string"}`. Content limit: 50,000 characters per message.
+</ParamField>
+
+<ParamField body="idea" type="string" required>
+  Your product idea. This gives the agent context throughout the conversation. Up to 50,000 characters.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  UUID of your project. When provided, the agent has access to all research and build graphs in that project.
+</ParamField>
+
+<ParamField body="session_id" type="string">
+  Resume a previous conversation. The agent uses this to maintain memory across messages. Omit to start a new session.
+</ParamField>
+
+<ParamField body="has_research" type="boolean" default="false">
+  Set to `true` if you have completed research the agent should be aware of.
+</ParamField>
+
+<ParamField body="has_build_tree" type="boolean" default="false">
+  Set to `true` if you have a build graph the agent should be aware of.
+</ParamField>
+
+<ParamField body="research_context" type="string">
+  Serialized research context to inject directly into the agent's context window. Up to 100,000 characters.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/chat \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "messages": [
+      {"role": "user", "content": "What are the biggest white spaces in my market research, and which one should I build first?"}
+    ],
+    "idea": "A mobile app that helps freelancers track time and automatically generate invoices",
+    "project_id": "proj_uuid_here",
+    "session_id": null,
+    "has_research": true,
+    "has_build_tree": true
+  }'
+```
+
+```python python
+import requests
+
+response = requests.post(
+    "https://api.manticscore.com/chat",
+    headers={"Authorization": "Bearer <token>"},
+    json={
+        "messages": [
+            {
+                "role": "user",
+                "content": "What are the biggest white spaces in my market research, and which one should I build first?",
+            }
+        ],
+        "idea": "A mobile app that helps freelancers track time and automatically generate invoices",
+        "project_id": "proj_uuid_here",
+        "session_id": None,
+        "has_research": True,
+        "has_build_tree": True,
+    },
+    stream=True,
+)
+
+for line in response.iter_lines():
+    if line:
+        print(line.decode())
+```
+
+</CodeGroup>
+
+## Stream events
+
+The response is a stream of NDJSON events. Parse each line as a JSON object and handle events by the `event` field.
+
+<AccordionGroup>
+  <Accordion title="stream_start">
+    First event on every connection. Save the `session_id` to resume this conversation later.
+
+    ```json
+    {"v": 1, "event": "stream_start", "data": {"request_id": "req_abc", "session_id": "sess_xyz"}}
+    ```
+  </Accordion>
+
+  <Accordion title="agent_turn">
+    The agent is starting a new reasoning turn. `stop_reason` tells you whether the turn ended by calling a tool or by producing a response.
+
+    ```json
+    {"v": 1, "event": "agent_turn", "data": {"turn": 1, "stop_reason": "tool_use"}}
+    ```
+  </Accordion>
+
+  <Accordion title="tool_call">
+    The agent is calling a tool. `tool_name` identifies which ManticScore or Composio tool is being invoked.
+
+    ```json
+    {"v": 1, "event": "tool_call", "data": {"tool_name": "query_research", "args": {"turn": 1}}}
+    ```
+  </Accordion>
+
+  <Accordion title="tool_progress">
+    Live status updates from within a running tool. When the agent calls `run_research` or `start_implementation`, pipeline stage events are forwarded here.
+
+    ```json
+    {
+      "v": 1,
+      "event": "tool_progress",
+      "data": {
+        "turn": 1,
+        "tool": "run_research",
+        "status": "in_progress",
+        "pipeline_event": "search stage completed"
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="message_delta">
+    A chunk of the agent's text response. Append each `text` value to build the full message.
+
+    ```json
+    {"v": 1, "event": "message_delta", "data": {"text": "The largest white space in your market is "}}
+    ```
+  </Accordion>
+
+  <Accordion title="conversation_summary">
+    Emitted at the end of the response. Contains a summary of the conversation, the tools used, and the `session_id` for resuming.
+
+    ```json
+    {
+      "v": 1,
+      "event": "conversation_summary",
+      "data": {
+        "summary": "Analyzed white spaces in freelance invoicing market. Recommended focusing on AI-assisted late payment handling.",
+        "tools_used": ["query_research"],
+        "session_id": "sess_xyz"
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="done">
+    Final event. The stream is closed.
+
+    ```json
+    {"v": 1, "event": "done", "data": {}}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Managing sessions
+
+The agent maintains memory within a session and can reference earlier messages. Each session is tied to a `session_id` returned in `stream_start`.
+
+### List sessions
+
+```bash curl
+curl --request GET \
+  --url 'https://api.manticscore.com/chat/sessions?limit=20' \
+  --header 'Authorization: Bearer <token>'
+```
+
+### Get a session with full event history
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/chat/sessions/sess_xyz \
+  --header 'Authorization: Bearer <token>'
+```
+
+### Delete a session
+
+```bash curl
+curl --request DELETE \
+  --url https://api.manticscore.com/chat/sessions/sess_xyz \
+  --header 'Authorization: Bearer <token>'
+```
+
+## Cross-session memory
+
+The agent builds memory across sessions within a project. You can inspect or clear this memory:
+
+**Fetch memories for a project:**
+
+```bash curl
+curl --request GET \
+  --url 'https://api.manticscore.com/chat/memory?project_id=proj_uuid_here' \
+  --header 'Authorization: Bearer <token>'
+```
+
+**Clear memories:**
+
+```bash curl
+curl --request DELETE \
+  --url 'https://api.manticscore.com/chat/memory?project_id=proj_uuid_here' \
+  --header 'Authorization: Bearer <token>'
+```
+
+Omit `project_id` to clear all memories across all projects.
+
+## Limits and credits
+
+| | Value |
+|---|---|
+| Rate limit | 20 requests / minute |
+| Credit cost | 1 credit per conversation |
+| Max message length | 50,000 characters |
+| Max research context | 100,000 characters |
+
+<Tip>
+Pass `session_id` on follow-up messages within the same conversation. The agent uses session context to avoid repeating tool calls and to give more relevant answers based on what it already retrieved.
+</Tip>

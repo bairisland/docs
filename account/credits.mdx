@@ -1,0 +1,111 @@
+---
+title: "Credits, rate limits, and AI operation costs"
+description: "Understand how ManticScore credits work, what each AI operation costs, how daily resets work on the free tier, and how to check your current usage."
+---
+
+ManticScore uses a credit system to meter AI-powered operations. Each time you run a research job, start a Forge session, or send a chat message, a small number of credits is deducted from your balance.
+
+## Credit costs
+
+| Operation | Credits |
+|-----------|---------|
+| Market research | 3 |
+| Feature deep research | 3 |
+| Forge (agentic coding) | 2 |
+| Build graph | 1 |
+| Chat message | 1 |
+
+## Free tier vs. paid plans
+
+**Free tier:** you receive 20 credits per day. Credits reset automatically every 24 hours based on your last reset timestamp.
+
+**Pro and Early Access:** credits are lifetime — they don't reset daily and don't expire.
+
+<Note>
+  The daily reset for free accounts runs automatically when you call `GET /auth/bootstrap` or `GET /profile` if more than 24 hours have passed since your last reset. No manual action is required.
+</Note>
+
+## Checking your usage
+
+Your current credit usage is included in your profile and bootstrap responses.
+
+<Tabs>
+  <Tab title="Profile endpoint">
+    ```bash
+    GET /profile
+    Authorization: Bearer <token>
+    ```
+
+    ```json
+    {
+      "credits_used": 3,
+      "credits_total": 20,
+      ...
+    }
+    ```
+  </Tab>
+  <Tab title="Bootstrap endpoint">
+    ```bash
+    GET /auth/bootstrap
+    Authorization: Bearer <token>
+    ```
+
+    ```json
+    {
+      "subscription": {
+        "plan": "free",
+        "credits_used": 3,
+        "credits_total": 20
+      },
+      ...
+    }
+    ```
+  </Tab>
+</Tabs>
+
+When `credits_used` equals `credits_total`, the next AI operation that requires credits returns `429 Too Many Requests`. Free-tier accounts recover automatically when the daily reset fires.
+
+## Rate limits
+
+Credits and rate limits are separate mechanisms. Rate limits cap how many requests you can send per minute, regardless of your credit balance.
+
+| Endpoint | Limit |
+|----------|-------|
+| Research | 10 / minute |
+| Feature research | 5 / minute |
+| Chat | 20 / minute |
+| Forge | 10 / minute |
+
+When a rate limit is hit, the response includes a `Retry-After` header indicating when you can try again.
+
+```
+HTTP 429 Too Many Requests
+Retry-After: 30
+```
+
+<Note>
+  Rate-limited research requests with a valid session token may be captured to a retry queue rather than dropped entirely. Each account can have up to 5 pending queued requests.
+</Note>
+
+## Research quality stats
+
+You can view aggregate quality scores across all completed research to understand how well the AI is performing on your ideas.
+
+```bash
+GET /projects/quality-stats
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "total_research": 10,
+  "avg_quality_score": 72.5,
+  "min_quality_score": 45.0,
+  "max_quality_score": 95.0,
+  "monthly": [
+    {"month": "2026-04-01T00:00:00Z", "count": 3, "avg_score": 70.0}
+  ]
+}
+```
+
+Quality scores range from 0 to 100 and reflect factors like competitor coverage, feature depth, signal quality, and interpretation specificity.

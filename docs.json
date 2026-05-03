@@ -1,0 +1,121 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "luma",
+  "name": "ManticScore",
+  "colors": {
+    "primary": "#6366F1",
+    "light": "#EEF2FF",
+    "dark": "#312E81"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/bairisland"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Docs",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "authentication"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/market-research",
+              "features/feature-research",
+              "features/build-graphs",
+              "features/forge",
+              "features/competitive-signals",
+              "features/chat-agent"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/overview",
+              "integrations/github",
+              "integrations/linear-jira",
+              "integrations/slack-notion",
+              "integrations/automations"
+            ]
+          },
+          {
+            "group": "Real-Time Streaming",
+            "pages": [
+              "streaming/ndjson-protocol",
+              "streaming/websocket"
+            ]
+          },
+          {
+            "group": "Account & Settings",
+            "pages": [
+              "account/profile",
+              "account/credits",
+              "account/secrets",
+              "account/notifications"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/overview",
+              "api-reference/authentication",
+              "api-reference/errors",
+              "api-reference/mcp"
+            ]
+          },
+          {
+            "group": "Projects & Research",
+            "pages": [
+              "api-reference/projects",
+              "api-reference/public-projects",
+              "api-reference/products",
+              "api-reference/research",
+              "api-reference/feature-research",
+              "api-reference/briefs",
+              "api-reference/clips",
+              "api-reference/canonical"
+            ]
+          },
+          {
+            "group": "Build & Forge",
+            "pages": [
+              "api-reference/build-graphs",
+              "api-reference/build-nodes",
+              "api-reference/forge"
+            ]
+          },
+          {
+            "group": "Intelligence & Chat",
+            "pages": [
+              "api-reference/signals",
+              "api-reference/chat",
+              "api-reference/search"
+            ]
+          },
+          {
+            "group": "Integrations & Ship",
+            "pages": [
+              "api-reference/integrations",
+              "api-reference/automations",
+              "api-reference/ship"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

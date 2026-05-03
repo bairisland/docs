@@ -1,0 +1,942 @@
+---
+title: "Projects API — full CRUD and combined endpoints"
+description: "Create, read, update, and delete projects. Includes atomic project-plus-research creation, per-tab data extraction, semantic search, and public previews."
+---
+
+Projects are the top-level container in ManticScore. Each project holds research runs, build graphs, briefs, and feature deep research. You can create a bare project and attach research later, or use the atomic `POST /projects/research` endpoint to create a project and kick off a research pipeline in a single call. The list endpoint is optimized for speed and returns quickly even when you have many projects.
+
+## Create a project
+
+<ParamField body="title" type="string" required>
+  Display name for the project. Used to generate the URL slug and the normalized `clean_title`.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Free-text description of what you're building. Defaults to an empty string.
+</ParamField>
+
+<Note>
+  **Idempotent by idea.** Submitting the same idea twice from the same account does not create a duplicate. The server collapses both calls to the same project — the second request returns the existing project's `id` with a refreshed `updated_at`, surfacing it at the top of your recent list. Two distinct ideas that happen to share a `short_title` remain separate projects.
+</Note>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/projects \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "AI expense tracker", "description": "Automated receipt capture for freelancers"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/projects",
+    headers={"Authorization": "Bearer <token>"},
+    json={"title": "AI expense tracker", "description": "Automated receipt capture for freelancers"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 201 response
+{
+  "id": "9f4e2a1b-...",
+  "user_id": "user_abc123",
+  "title": "AI expense tracker",
+  "slug": "ai-expense-tracker",
+  "state": "draft",
+  "quality_score": 0,
+  "description": "Automated receipt capture for freelancers",
+  "clean_title": "AI Expense Tracker",
+  "one_liner": "Automated receipt capture for freelancers.",
+  "normalization_status": "complete",
+  "created_at": "2026-04-19T10:00:00Z",
+  "updated_at": "2026-04-19T10:00:00Z"
+}
+```
+
+<Note>
+  Immediately after the project row is persisted, the server kicks off a background canonical-knowledge lookup that pre-populates the project with suggested competitors and features drawn from similar prior research. Suggestions are delivered as a `project.seeded` event on the [`project` channel](/streaming/websocket) — not in this response. Subscribe to the channel using the project UUID as `entity_id` to receive them, or read them off the timeline returned by `GET /projects/{id}/home`.
+
+  The event payload looks like:
+
+  ```json
+  {
+    "v": 1,
+    "event": "project.seeded",
+    "data": {
+      "kind": "project_seeded",
+      "summary": "Suggested 6 competitors + 8 features from 7 similar prior projects",
+      "competitors": [
+        {"name": "Expensify", "domain": "expensify.com", "description": "...", "frequency": 5}
+      ],
+      "features": [
+        {"name": "Receipt OCR", "category": "capture", "description": "...", "frequency": 4}
+      ],
+      "based_on_n_prior_projects": 7
+    }
+  }
+  ```
+
+  This step is best-effort. If the canonical layer is empty, the embedding fails, or no similar prior research exists, no event is emitted (or the event arrives with empty `competitors` and `features` arrays). Project creation never blocks on or fails because of seeding.
+</Note>
+
+<ResponseField name="id" type="string" required>
+  UUID for the new project.
+</ResponseField>
+
+<ResponseField name="slug" type="string" required>
+  URL-safe identifier derived from `title`.
+</ResponseField>
+
+<ResponseField name="state" type="string" required>
+  Always `draft` on creation. Transitions: `draft → researching → ready → building`, plus `blocked` and `done` as manual targets.
+</ResponseField>
+
+<ResponseField name="quality_score" type="number" required>
+  Starts at `0`. Updated after each completed research run.
+</ResponseField>
+
+<ResponseField name="clean_title" type="string">
+  Normalized version of the title produced by the LLM normalization pass.
+</ResponseField>
+
+<ResponseField name="one_liner" type="string">
+  Single sentence summary generated during normalization.
+</ResponseField>
+
+<ResponseField name="normalization_status" type="string">
+  Either `complete` or `failed`.
+</ResponseField>
+
+---
+
+## Create a project and start research atomically
+
+Use this endpoint instead of calling `POST /projects` followed by `POST /research`. It creates the project row and enqueues the first research job in a single transaction.
+
+<Note>
+  Supply an `Idempotency-Key` header to safely retry the request on network failure. The server replays the original response without starting a duplicate pipeline.
+</Note>
+
+<ParamField body="idea" type="string" required>
+  The product idea to research. Maximum 5,000 characters.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Optional extended context. Defaults to an empty string.
+</ParamField>
+
+<ParamField body="mode" type="string" default="market">
+  Research mode. Either `market` (full market analysis) or `feature` (feature-focused analysis that auto-chains into feature deep research on completion).
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/projects/research \
+  -H "Authorization: Bearer <token>" \
+  -H "Idempotency-Key: my-unique-key-001" \
+  -H "Content-Type: application/json" \
+  -d '{"idea": "AI expense tracker for freelancers", "mode": "market"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/projects/research",
+    headers={
+        "Authorization": "Bearer <token>",
+        "Idempotency-Key": "my-unique-key-001",
+    },
+    json={"idea": "AI expense tracker for freelancers", "mode": "market"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+<Tabs>
+  <Tab title="202 — new pipeline">
+    ```json
+    {
+      "project_id": "9f4e2a1b-...",
+      "job_id": "7c3d1e9a-...",
+      "status": "queued",
+      "position": 0
+    }
+    ```
+    The research job is queued. Stream progress from `GET /research/{job_id}/events`.
+  </Tab>
+  <Tab title="200 — cache hit">
+    ```json
+    {
+      "project_id": "9f4e2a1b-...",
+      "job_id": "4a8b2f1c-...",
+      "cache_action": "clone",
+      "status": "completed"
+    }
+    ```
+    An identical idea was already researched. The server cloned the prior result instantly — no pipeline started.
+  </Tab>
+</Tabs>
+
+<Warning>
+  A `409` response means an identical request is already in progress. Wait for the existing job to complete before retrying.
+</Warning>
+
+---
+
+## List projects
+
+Returns a paginated list of your projects, ordered by most recently updated. This is the fastest way to get an overview of your projects.
+
+<ParamField query="limit" type="number" default="5">
+  Maximum items to return. Upper bound: 100.
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of items to skip for pagination.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects?limit=10&offset=0" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/projects",
+    headers={"Authorization": "Bearer <token>"},
+    params={"limit": 10, "offset": 0},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "items": [
+    {
+      "project_id": "9f4e2a1b-...",
+      "state": "ready",
+      "quality_score": 78,
+      "short_title": "AI Expense Tracker",
+      "short_description": "Automated receipt capture for freelancers.",
+      "last_research_completed_at": "2026-04-18T14:30:00Z",
+      "has_benchmark_signal": true,
+      "research_count": 2,
+      "graph_count": 1,
+      "updated_at": "2026-04-18T14:30:00Z"
+    }
+  ],
+  "limit": 10,
+  "offset": 0,
+  "has_more": false
+}
+```
+
+<ResponseField name="items" type="object[]" required>
+  <Expandable title="item properties">
+    <ResponseField name="project_id" type="string">
+      Project UUID.
+    </ResponseField>
+    <ResponseField name="state" type="string">
+      One of `draft`, `researching`, `ready`, `building`, `blocked`, `done`.
+    </ResponseField>
+    <ResponseField name="quality_score" type="number">
+      0–100 score computed from research completeness signals.
+    </ResponseField>
+    <ResponseField name="short_title" type="string">
+      Up to 3-word title for display in compact list views.
+    </ResponseField>
+    <ResponseField name="short_description" type="string">
+      30–80 character description for list views.
+    </ResponseField>
+    <ResponseField name="last_research_completed_at" type="string">
+      ISO 8601 timestamp of the most recent completed research, or `null` if none.
+    </ResponseField>
+    <ResponseField name="has_benchmark_signal" type="boolean">
+      Whether competitive benchmark data is present in the latest research.
+    </ResponseField>
+    <ResponseField name="research_count" type="number">
+      Total number of completed research runs attached to this project.
+    </ResponseField>
+    <ResponseField name="graph_count" type="number">
+      Total number of build graphs attached to this project.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="has_more" type="boolean" required>
+  `true` if additional pages exist. Use `offset` to paginate.
+</ResponseField>
+
+---
+
+## Get a project
+
+Returns the project detail row along with counts and inline summaries of recent research and build graphs.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "9f4e2a1b-...",
+  "user_id": "user_abc123",
+  "title": "AI expense tracker",
+  "slug": "ai-expense-tracker",
+  "state": "ready",
+  "quality_score": 78,
+  "description": "Automated receipt capture for freelancers",
+  "research_count": 2,
+  "graph_count": 1,
+  "recent_research": [
+    {
+      "id": "7c3d1e9a-...",
+      "idea": "AI expense tracker for freelancers",
+      "status": "completed",
+      "category": "fintech",
+      "score": "78",
+      "created_at": "2026-04-18T14:00:00Z",
+      "updated_at": "2026-04-18T14:30:00Z"
+    }
+  ],
+  "build_graphs": [
+    {
+      "id": "5b2c8f3d-...",
+      "title": "AI Expense Tracker MVP",
+      "status": "ready",
+      "node_count": 12,
+      "created_at": "2026-04-18T15:00:00Z",
+      "updated_at": "2026-04-18T15:10:00Z"
+    }
+  ],
+  "created_at": "2026-04-18T10:00:00Z",
+  "updated_at": "2026-04-18T15:10:00Z"
+}
+```
+
+Returns `404` if the project does not exist or belongs to another user.
+
+---
+
+## Get the full project (mobile-optimized)
+
+Returns the project, its latest completed research, any in-progress research job, the latest build graph with full node tree, and similar projects — all in one call.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../full" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "9f4e2a1b-...",
+  "title": "AI expense tracker",
+  "research": { "...": "full research payload" },
+  "research_in_progress": {
+    "job_id": "3a9c7e2b-...",
+    "status": "running",
+    "stage": "analyze"
+  },
+  "build_graph": { "roots": ["..."] },
+  "similar": [
+    {
+      "id": "b4f1d8a2-...",
+      "idea": "Expense automation for SMBs",
+      "category": "fintech",
+      "similarity": 0.88
+    }
+  ]
+}
+```
+
+<Tip>
+  Use this endpoint in your mobile app to replace three separate calls (`GET /projects/{id}`, `GET /projects/{id}/research`, `GET /projects/{id}/build-graph`). Build graph nodes are returned under `roots`, not `nodes`.
+</Tip>
+
+---
+
+## Get the project home (single round-trip aggregator)
+
+Returns everything the mobile project tab needs in a single call: the project, its short digest, recent research, build graphs, briefs, voice clips, agents, Forge runs, and the most recent timeline events. Pair this with a single WebSocket subscription on the [`project` channel](/streaming/websocket) using the returned `ws.last_event_seq` as `cursor` to keep the screen live.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../home" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "project": {
+    "id": "9f4e2a1b-...",
+    "short_title": "AI Expense Tracker",
+    "description": "Automated receipt capture for freelancers.",
+    "status": "ready",
+    "quality": 78,
+    "created_at": "2026-04-18T10:00:00Z",
+    "updated_at": "2026-04-19T11:30:00Z"
+  },
+  "digest": "Latest: 2 research runs, 1 build graph in flight, 1 PR open.",
+  "research": [
+    {
+      "id": "7c3d1e9a-...",
+      "status": "completed",
+      "version": 1,
+      "completed_at": "2026-04-18T14:30:00Z",
+      "quality": {"overall_score": 78},
+      "top_competitors": ["Expensify", "Receipts by Wave", "Ramp"]
+    }
+  ],
+  "build_graphs": [
+    {
+      "id": "5b2c8f3d-...",
+      "status": "ready",
+      "node_count": 12,
+      "expanded_count": 6,
+      "completed_at": "2026-04-18T15:10:00Z"
+    }
+  ],
+  "briefs": [
+    {
+      "id": "b1c2d3e4-...",
+      "audience": "investor",
+      "share_url": "https://api.manticscore.com/share/abc123",
+      "created_at": "2026-04-18T16:00:00Z"
+    }
+  ],
+  "clips": [
+    {
+      "slug": "april-spotlight",
+      "target_type": "voice",
+      "target_id": "9f4e2a1b-...",
+      "created_at": "2026-04-18T17:00:00Z"
+    }
+  ],
+  "agents": [
+    {
+      "id": "ag-001",
+      "goal": "Every weekday at 9am, summarize new Linear issues and post to #engineering on Slack.",
+      "schedule_cron": "0 9 * * 1-5",
+      "last_status": "completed",
+      "last_run_at": "2026-04-19T09:00:00Z",
+      "next_run_at": "2026-04-22T09:00:00Z"
+    }
+  ],
+  "forge_runs": [
+    {
+      "id": "fr-001",
+      "status": "completed",
+      "repository_name": "acme/expense-tracker",
+      "created_at": "2026-04-19T08:00:00Z",
+      "pr_url": "https://github.com/acme/expense-tracker/pull/42"
+    }
+  ],
+  "timeline": [
+    {
+      "ts": "2026-04-19T11:30:00Z",
+      "kind": "research",
+      "summary": "Research run completed",
+      "ref": "7c3d1e9a-..."
+    }
+  ],
+  "ws": {
+    "channel": "project",
+    "project_id": "9f4e2a1b-...",
+    "last_event_seq": 184
+  }
+}
+```
+
+<ResponseField name="project" type="object" required>
+  Compact project block. `short_title` and `description` come from the summary projection; `status` is the current state (`draft`, `researching`, `ready`, `building`, `blocked`, `done`).
+</ResponseField>
+
+<ResponseField name="digest" type="string">
+  One-line natural language summary of recent project activity. Empty string when nothing notable has happened.
+</ResponseField>
+
+<ResponseField name="research" type="object[]">
+  Up to the 10 most recent research runs. Each entry carries `id`, `status`, `version`, `completed_at`, the overall `quality.overall_score`, and the first three competitor names from `incumbents`.
+</ResponseField>
+
+<ResponseField name="build_graphs" type="object[]">
+  Up to the 5 most recent build graphs with `node_count` and `expanded_count`. Subscribe to the [`build` channel](/streaming/websocket) for live updates.
+</ResponseField>
+
+<ResponseField name="briefs" type="object[]">
+  Up to the 10 most recent briefs with `audience` (template name) and a `share_url` when a share token is set.
+</ResponseField>
+
+<ResponseField name="clips" type="object[]">
+  Voice clips threaded to this project. Each entry has `slug`, `target_type`, `target_id`, and `created_at`.
+</ResponseField>
+
+<ResponseField name="agents" type="object[]">
+  Up to 20 active spawned agents attached to this project. Each entry includes the natural-language `goal`, `schedule_cron` (cron, ISO interval, or `on:event` sentinel), and last/next run timestamps.
+</ResponseField>
+
+<ResponseField name="forge_runs" type="object[]">
+  Up to 10 most recent Forge runs scoped to this project, with `pr_url` populated when the run created a GitHub pull request.
+</ResponseField>
+
+<ResponseField name="timeline" type="object[]">
+  Up to 50 most recent fanned-in events from research, build, brief, Forge, chat, and agent runs. Each entry has `ts`, `kind`, a short `summary` (truncated to 200 chars), and an optional `ref` (entity UUID).
+</ResponseField>
+
+<ResponseField name="ws" type="object" required>
+  Subscription coordinates for the [`project` channel](/streaming/websocket). Pass `last_event_seq` as `cursor` in your subscribe frame to resume from the exact point the home payload was generated.
+</ResponseField>
+
+<Tip>
+  Use this endpoint as your single fetch on project-tab load. Render from the response, then open one WebSocket subscription on `channel="project"` with `cursor = ws.last_event_seq` to receive all subsequent activity across every domain.
+</Tip>
+
+Returns `404` if the project does not exist or belongs to another user.
+
+---
+
+## Get the public preview
+
+Returns a safe public subset of the project — no user information. Accessible without authentication. Use this for social sharing, App Clip previews, and OG tag generation.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../preview"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "9f4e2a1b-...",
+  "title": "AI expense tracker",
+  "description": "Automated receipt capture for freelancers",
+  "state": "ready",
+  "quality_score": 78,
+  "interpretation": {},
+  "competitors": ["Expensify", "Receipts by Wave"],
+  "features": ["OCR receipt scanning", "Bank sync"]
+}
+```
+
+---
+
+## Update a project
+
+Accepts any subset of fields. Pass `null` to clear a field.
+
+<ParamField body="title" type="string">
+  Updated project title.
+</ParamField>
+
+<ParamField body="description" type="string">
+  Updated description.
+</ParamField>
+
+<ParamField body="state" type="string">
+  Manually override the project state. Valid values: `draft`, `researching`, `ready`, `building`, `blocked`, `done`.
+</ParamField>
+
+<ParamField body="github_repo" type="string">
+  GitHub repository in `owner/repo` format. Used by Forge for code generation. Pass `null` to clear.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/projects/9f4e2a1b-..." \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"state": "building", "github_repo": "acme/expense-tracker"}'
+```
+
+</CodeGroup>
+
+Returns the full updated project row on `200`.
+
+---
+
+## Delete a project
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE "https://api.manticscore.com/projects/9f4e2a1b-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{"success": true}
+```
+
+---
+
+## Get research data for a project
+
+Returns the full payload of the latest completed research run attached to this project.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../research" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "7c3d1e9a-...",
+  "idea": "AI expense tracker for freelancers",
+  "status": "completed",
+  "interpretation": {},
+  "incumbents": [],
+  "emerging": [],
+  "features": [],
+  "signals": [],
+  "white_spaces": [],
+  "quality": {},
+  "created_at": "2026-04-18T14:00:00Z",
+  "updated_at": "2026-04-18T14:30:00Z"
+}
+```
+
+---
+
+## Get the build graph for a project
+
+Returns the latest build graph with the full node tree assembled under `roots`.
+
+<Note>
+  This endpoint returns nodes under `roots`. The direct `GET /build-graphs/{id}` endpoint uses `nodes` instead.
+</Note>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../build-graph" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "5b2c8f3d-...",
+  "title": "AI Expense Tracker MVP",
+  "status": "ready",
+  "selected_features": [
+    {"id": "feat_001", "label": "OCR receipt scanning", "source": "research"}
+  ],
+  "created_at": "2026-04-18T15:00:00Z",
+  "updated_at": "2026-04-18T15:10:00Z",
+  "roots": []
+}
+```
+
+---
+
+## List feature research jobs for a project
+
+Returns the latest 10 feature deep research jobs associated with this project.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../feature-research" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+[
+  {
+    "id": "d2e7b4c1-...",
+    "status": "completed",
+    "pipeline_stage": "completed",
+    "selected_features": [],
+    "score": "7.5",
+    "created_at": "2026-04-18T16:00:00Z",
+    "updated_at": "2026-04-18T16:45:00Z"
+  }
+]
+```
+
+---
+
+## Get per-tab research data
+
+Extracts a single column from the research table for a given display tab. Useful for populating individual UI tabs without fetching the entire research payload.
+
+<ParamField path="tab" type="string" required>
+  The tab to fetch. One of: `incumbents`, `emerging`, `features`, `signals`, `white_spaces`, `interpretation`, `quality`, `sources`, `recommendations`, `existential_risks`, `build_readiness`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../incumbents" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+Returns an array of research rows, each containing `id` and the requested column. Returns `400` for an unrecognized tab name.
+
+---
+
+## Semantic search
+
+Search across your projects (and any public projects you have access to) using natural language. A query like "mobile payments for gig workers" surfaces semantically related projects, not just exact keyword matches.
+
+<ParamField query="q" type="string" required>
+  Search query. Between 1 and 500 characters.
+</ParamField>
+
+<ParamField query="limit" type="number" default="10">
+  Number of results to return. Upper bound: 50.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/search?q=fintech+budgeting&limit=10" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/projects/search",
+    headers={"Authorization": "Bearer <token>"},
+    params={"q": "fintech budgeting", "limit": 10},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+[
+  {
+    "id": "9f4e2a1b-...",
+    "idea": "AI expense tracker for freelancers",
+    "similarity": 0.92,
+    "is_own": true
+  }
+]
+```
+
+<ResponseField name="similarity" type="number" required>
+  Cosine similarity score between 0 and 1. Higher is more relevant.
+</ResponseField>
+
+<ResponseField name="is_own" type="boolean" required>
+  `true` if the result belongs to the authenticated user.
+</ResponseField>
+
+Returns `503` if the semantic search service is temporarily unavailable. Retry after a moment.
+
+---
+
+## Publish a project
+
+Flips a project to public-by-opt-in and returns its shareable URL. Projects are private by default; publishing makes the project readable at [`GET /public/p/{slug}`](/api-reference/public-projects) without authentication. The slug is derived from the kebab-cased title plus a 6-character salted hash so unpublished or unknown slugs cannot be brute-forced.
+
+Re-publishing an already-published project (or publishing an unpublished one that previously had a slug) returns the same URL — slugs are deterministic and durable.
+
+Requires a real (non-anonymous) account. Anonymous principals receive `401`. Persists a `project.published` event on the [`project` channel](/streaming/websocket).
+
+<ParamField path="project_id" type="string" required>
+  UUID of the project to publish.
+</ParamField>
+
+<ParamField body="options" type="object">
+  Per-section visibility toggles. Omitted fields fall back to defaults.
+
+  <Expandable title="public_options fields">
+    <ParamField body="show_idea" type="boolean" default="true">
+      Show the raw idea, problem statement, and target user.
+    </ParamField>
+
+    <ParamField body="show_research_summary" type="boolean" default="true">
+      Show the research summary block (top features, white spaces).
+    </ParamField>
+
+    <ParamField body="show_competitors" type="boolean" default="false">
+      Include the top competitors (incumbents + emerging) in the research summary.
+    </ParamField>
+
+    <ParamField body="show_build_plan" type="boolean" default="false">
+      Show node count statistics from the most recent build graph. The full build tree is never exposed publicly.
+    </ParamField>
+
+    <ParamField body="show_forge_prs" type="boolean" default="false">
+      Include up to 10 most recent Forge pull requests (repo, PR number, URL only).
+    </ParamField>
+
+    <ParamField body="show_handle_or_anon" type="string" default="anon">
+      Author credit on the public page. Either `anon` or `handle` (uses the profile name).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/projects/9f4e2a1b-.../publish" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"options": {"show_competitors": true, "show_handle_or_anon": "handle"}}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/projects/9f4e2a1b-.../publish",
+    headers={"Authorization": "Bearer <token>"},
+    json={"options": {"show_competitors": True, "show_handle_or_anon": "handle"}},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "slug": "ai-expense-tracker-9f4e2a",
+  "public_url": "https://cms.manticscore.com/p/ai-expense-tracker-9f4e2a"
+}
+```
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="slug" type="string" required>
+  The deterministic public slug. Stable across re-publishes.
+</ResponseField>
+
+<ResponseField name="public_url" type="string" required>
+  Absolute URL of the public project page.
+</ResponseField>
+
+Returns:
+
+- `400` — unknown key in `options`, wrong value type, or invalid `show_handle_or_anon` choice.
+- `401` — anonymous principal (publishing requires a real account).
+- `404` — project does not exist or belongs to another user.
+
+---
+
+## Unpublish a project
+
+Flips `is_public` back to `false`. The slug and `published_at` timestamp are preserved as an audit trail, so re-publishing later returns the same URL.
+
+Persists a `project.unpublished` event on the [`project` channel](/streaming/websocket).
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/projects/9f4e2a1b-.../unpublish" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/projects/9f4e2a1b-.../unpublish",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "slug": "ai-expense-tracker-9f4e2a"
+}
+```
+
+Returns `404` if the project does not exist or belongs to another user.
+
+---
+
+## Update public visibility options
+
+Updates `public_options` without changing `is_public` or `published_at`. Use this to tweak what's visible on an already-public page.
+
+<ParamField path="project_id" type="string" required>
+  UUID of the project.
+</ParamField>
+
+<ParamField body="options" type="object" required>
+  New `public_options` payload. Same fields as the [publish endpoint](#publish-a-project). Unknown keys return `400`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/projects/9f4e2a1b-.../publish-options" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"options": {"show_build_plan": true, "show_forge_prs": true}}'
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "slug": "ai-expense-tracker-9f4e2a",
+  "options": {
+    "show_idea": true,
+    "show_research_summary": true,
+    "show_competitors": false,
+    "show_build_plan": true,
+    "show_forge_prs": true,
+    "show_handle_or_anon": "anon"
+  }
+}
+```
+
+Returns:
+
+- `400` — unknown key in `options` or invalid value type.
+- `404` — project does not exist or belongs to another user.

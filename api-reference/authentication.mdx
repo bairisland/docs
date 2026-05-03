@@ -1,0 +1,387 @@
+---
+title: "Authenticating requests to the ManticScore API"
+description: "Exchange a Clerk JWT for a session token, start anonymous sessions for zero-friction onboarding, rebind on sign-in, and call bootstrap to hydrate your app state on launch."
+---
+
+ManticScore supports two ways to obtain a session token:
+
+- **Authenticated sessions** — start from a Clerk JWT and exchange it for an opaque session token tied to your Clerk user id.
+- **Anonymous sessions** — start from a stable device id (no sign-in required) and receive a session token tied to an anonymous principal. When the user later signs in, a single rebind call re-owns every anonymous artifact to the authenticated account.
+
+Session tokens are validated in O(1) time on the server, making them significantly faster than repeated JWT verification.
+
+## Step 1 — Get a Clerk JWT
+
+Obtain a short-lived Clerk JWT using the Clerk frontend SDK appropriate for your platform. Refer to the [Clerk documentation](https://clerk.com/docs) for platform-specific instructions. You'll use this JWT exactly once: to mint a session token.
+
+## Step 2 — Exchange for a session token
+
+Call `POST /auth/session` with your Clerk JWT in the `Authorization` header. The server verifies the JWT, creates a session, and returns an opaque session token.
+
+<Warning>
+  `POST /auth/session` only accepts a Clerk JWT. You cannot use an existing session token to mint a new one — call this endpoint with your Clerk JWT each time you need to refresh.
+</Warning>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/session \
+  -H "Authorization: Bearer <clerk_jwt>"
+```
+
+```python Python
+import httpx
+
+response = httpx.post(
+    "https://api.manticscore.com/auth/session",
+    headers={"Authorization": f"Bearer {clerk_jwt}"},
+)
+data = response.json()
+session_token = data["token"]
+```
+
+```javascript JavaScript
+const response = await fetch("https://api.manticscore.com/auth/session", {
+  method: "POST",
+  headers: { Authorization: `Bearer ${clerkJwt}` },
+});
+const { token } = await response.json();
+```
+
+</CodeGroup>
+
+**Request parameters**
+
+<ParamField header="Authorization" type="string" required>
+  Your Clerk JWT. Format: `Bearer <clerk_jwt>`.
+</ParamField>
+
+**Response**
+
+```json 200 response
+{
+  "token": "ms_sess_a1b2c3d4e5f6...",
+  "expires_in": 1800
+}
+```
+
+<ResponseField name="token" type="string" required>
+  Opaque session token. Treat this like a password — store it securely and never log it.
+</ResponseField>
+
+<ResponseField name="expires_in" type="number" required>
+  Seconds until the token expires. Always `1800` (30 minutes).
+</ResponseField>
+
+## Step 3 — Attach the session token to requests
+
+Include the session token as a Bearer token on every protected endpoint:
+
+```
+Authorization: Bearer <session_token>
+```
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/projects \
+  -H "Authorization: Bearer ms_sess_a1b2c3d4e5f6..."
+```
+
+```python Python
+import httpx
+
+headers = {"Authorization": f"Bearer {session_token}"}
+projects = httpx.get("https://api.manticscore.com/projects", headers=headers).json()
+```
+
+```javascript JavaScript
+const projects = await fetch("https://api.manticscore.com/projects", {
+  headers: { Authorization: `Bearer ${sessionToken}` },
+}).then((r) => r.json());
+```
+
+</CodeGroup>
+
+## Refreshing session tokens
+
+Session tokens expire after **30 minutes**. To refresh, call `POST /auth/session` again with a fresh Clerk JWT before the current token expires. You can do this proactively — for example, refresh 5 minutes before expiry rather than waiting for a `401 Token expired` response.
+
+<Tip>
+  Refresh proactively in long-running apps. If you let the token expire mid-stream, the NDJSON connection will close and you'll need to reconnect.
+</Tip>
+
+## Logging out
+
+Revoking a token immediately invalidates it server-side. Any in-flight requests using the revoked token will fail with `401`.
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE https://api.manticscore.com/auth/session \
+  -H "Authorization: Bearer ms_sess_a1b2c3d4e5f6..."
+```
+
+```python Python
+import httpx
+
+httpx.delete(
+    "https://api.manticscore.com/auth/session",
+    headers={"Authorization": f"Bearer {session_token}"},
+)
+```
+
+```javascript JavaScript
+await fetch("https://api.manticscore.com/auth/session", {
+  method: "DELETE",
+  headers: { Authorization: `Bearer ${sessionToken}` },
+});
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "success": true
+}
+```
+
+## Bootstrap — hydrate your app on launch
+
+After authenticating, call `GET /auth/bootstrap` as your first API request. It returns your profile, subscription details, and integration secrets in a single round trip. If this is your first sign-in, the server auto-creates your profile.
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/auth/bootstrap \
+  -H "Authorization: Bearer ms_sess_a1b2c3d4e5f6..."
+```
+
+```python Python
+import httpx
+
+bootstrap = httpx.get(
+    "https://api.manticscore.com/auth/bootstrap",
+    headers={"Authorization": f"Bearer {session_token}"},
+).json()
+```
+
+```javascript JavaScript
+const bootstrap = await fetch("https://api.manticscore.com/auth/bootstrap", {
+  headers: { Authorization: `Bearer ${sessionToken}` },
+}).then((r) => r.json());
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "profile": {
+    "name": "Ada Lovelace",
+    "email": "ada@example.com",
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20
+  },
+  "subscription": {
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20
+  },
+  "secrets": {
+    "has_github_pat": true,
+    "has_anthropic_key": false
+  }
+}
+```
+
+<ResponseField name="profile" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="name" type="string">
+      Display name on the account.
+    </ResponseField>
+    <ResponseField name="email" type="string">
+      Email address on the account.
+    </ResponseField>
+    <ResponseField name="plan" type="string">
+      Subscription tier. Currently `free` or `pro`.
+    </ResponseField>
+    <ResponseField name="credits_used" type="number">
+      Credits consumed in the current billing window.
+    </ResponseField>
+    <ResponseField name="credits_total" type="number">
+      Total credits available in the current billing window.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="subscription" type="object" required>
+  Current subscription state. Mirrors the credit fields in `profile` for convenience.
+</ResponseField>
+
+<ResponseField name="secrets" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="has_github_pat" type="boolean">
+      Whether you have a GitHub personal access token stored.
+    </ResponseField>
+    <ResponseField name="has_anthropic_key" type="boolean">
+      Whether you have an Anthropic API key stored.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Start an anonymous session
+
+Call `POST /auth/anonymous` with a stable `device_id` to mint a session token without any sign-in. Use this on first launch to let users try the product before creating an account. The returned token behaves like any other session token — attach it with `Authorization: Bearer <token>` on subsequent requests.
+
+This endpoint is unauthenticated (no `Authorization` header required) and idempotent on `device_id`: calling it again for the same device returns a session bound to the same anonymous principal.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/anonymous \
+  -H "Content-Type: application/json" \
+  -d '{"device_id": "<device_id>"}'
+```
+
+```python Python
+import httpx
+
+response = httpx.post(
+    "https://api.manticscore.com/auth/anonymous",
+    json={"device_id": device_id},
+)
+data = response.json()
+session_token = data["token"]
+```
+
+```javascript JavaScript
+const response = await fetch("https://api.manticscore.com/auth/anonymous", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ device_id: deviceId }),
+});
+const { token } = await response.json();
+```
+
+</CodeGroup>
+
+**Request body**
+
+<ParamField body="device_id" type="string" required>
+  Stable per-device identifier (1–200 chars). On iOS, use `identifierForVendor` or a Keychain-persisted UUID so the same device keeps the same anonymous principal across launches.
+</ParamField>
+
+**Response**
+
+```json 200 response
+{
+  "token": "ms_sess_a1b2c3d4e5f6...",
+  "expires_in": 1800
+}
+```
+
+<ResponseField name="token" type="string" required>
+  Opaque session token for the anonymous principal. Use it the same way as an authenticated session token.
+</ResponseField>
+
+<ResponseField name="expires_in" type="number" required>
+  Seconds until the token expires. Always `1800` (30 minutes).
+</ResponseField>
+
+<Note>
+  Anonymous writes are tagged internally with a sentinel `user_id` of the form `anon:<uuid>`. You should not rely on that string shape — treat the session token as opaque. Once the user signs in and you call `POST /auth/rebind`, every anonymous artifact is re-owned by the Clerk user in a single transaction.
+</Note>
+
+**Errors**
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `422` | `{"detail": "device_id required"}` | `device_id` is missing or empty |
+
+## Rebind an anonymous session to a signed-in user
+
+After a user signs in with Clerk, call `POST /auth/rebind` with the original `device_id` and the authenticated session token (or Clerk JWT) in the `Authorization` header. Every row written under the anonymous principal is re-owned by the authenticated user in a single database transaction, and a durable PostHog `alias` call is enqueued so conversion attribution survives transient analytics failures.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/rebind \
+  -H "Authorization: Bearer <authenticated_session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"device_id": "<device_id>"}'
+```
+
+```python Python
+import httpx
+
+response = httpx.post(
+    "https://api.manticscore.com/auth/rebind",
+    headers={"Authorization": f"Bearer {session_token}"},
+    json={"device_id": device_id},
+)
+result = response.json()
+```
+
+```javascript JavaScript
+const response = await fetch("https://api.manticscore.com/auth/rebind", {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${sessionToken}`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ device_id: deviceId }),
+});
+const result = await response.json();
+```
+
+</CodeGroup>
+
+**Request body**
+
+<ParamField body="device_id" type="string" required>
+  The same `device_id` used when calling `POST /auth/anonymous`. Must be 1–200 chars.
+</ParamField>
+
+**Response**
+
+```json 200 response
+{
+  "rebound": true,
+  "rows_updated": 14,
+  "anon_uuid": "b1e4..."
+}
+```
+
+<ResponseField name="rebound" type="boolean" required>
+  `true` when this call transferred artifacts to the authenticated user. `false` when the call was a no-op (for example, the device had no anonymous principal, or it was already rebound to the same user).
+</ResponseField>
+
+<ResponseField name="rows_updated" type="number" required>
+  Total number of rows re-owned across all user-scoped tables. `0` when `rebound` is `false`.
+</ResponseField>
+
+<ResponseField name="anon_uuid" type="string | null" required>
+  The anonymous principal UUID that was rebound, or `null` when there was nothing to rebind.
+</ResponseField>
+
+<Tip>
+  `POST /auth/rebind` is safe to call defensively after every sign-in. If the device never used an anonymous session, or the same device/user pair has already been rebound, the call is a no-op and returns `{"rebound": false}`.
+</Tip>
+
+**Errors**
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `401` | `{"detail": "Rebind requires an authenticated user token; got anonymous session"}` | The `Authorization` header carried an anonymous session token. Sign the user in first, then call rebind with the authenticated token. |
+| `409` | `{"detail": "device <id> already rebound to a different user"}` | This device was previously rebound to a different Clerk user. Human intervention is required. |
+| `422` | `{"detail": "device_id and clerk_user_id required"}` | The `device_id` field is missing from the body. |
+
+## Auth error reference
+
+| Status | Body | What to do |
+|--------|------|------------|
+| `401` | `{"detail": "Missing Bearer token"}` | Add an `Authorization: Bearer <token>` header |
+| `401` | `{"detail": "Token expired"}` | Call `POST /auth/session` to get a new session token |
+| `401` | `{"detail": "Invalid token: ..."}` | Check that the token was copied correctly and hasn't been tampered with |
+| `503` | `{"detail": "JWKS not loaded"}` | The auth service is temporarily unavailable — retry in a few seconds |

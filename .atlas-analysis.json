@@ -1,0 +1,147 @@
+{
+  "projectType": "saas",
+  "projectName": "ManticScore",
+  "projectDescription": "AI-powered product development platform that helps builders research markets, plan features, automate competitive intelligence, and ship code — all from one workspace.",
+  "theme": "luma",
+  "primaryColor": "#6366F1",
+  "lightColor": "#EEF2FF",
+  "darkColor": "#312E81",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Docs",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "authentication"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/market-research",
+              "features/feature-research",
+              "features/build-graphs",
+              "features/forge",
+              "features/competitive-signals",
+              "features/chat-agent"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/overview",
+              "integrations/github",
+              "integrations/linear-jira",
+              "integrations/slack-notion",
+              "integrations/automations"
+            ]
+          },
+          {
+            "group": "Real-Time Streaming",
+            "pages": [
+              "streaming/ndjson-protocol",
+              "streaming/websocket"
+            ]
+          },
+          {
+            "group": "Account & Settings",
+            "pages": [
+              "account/profile",
+              "account/credits",
+              "account/secrets",
+              "account/notifications"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/overview",
+              "api-reference/authentication",
+              "api-reference/errors"
+            ]
+          },
+          {
+            "group": "Projects & Research",
+            "pages": [
+              "api-reference/projects",
+              "api-reference/research",
+              "api-reference/feature-research",
+              "api-reference/briefs"
+            ]
+          },
+          {
+            "group": "Build & Forge",
+            "pages": [
+              "api-reference/build-graphs",
+              "api-reference/build-nodes",
+              "api-reference/forge"
+            ]
+          },
+          {
+            "group": "Intelligence & Chat",
+            "pages": [
+              "api-reference/signals",
+              "api-reference/chat",
+              "api-reference/search"
+            ]
+          },
+          {
+            "group": "Integrations & Ship",
+            "pages": [
+              "api-reference/integrations",
+              "api-reference/automations",
+              "api-reference/ship"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "AI market research pipeline with competitor analysis and white-space detection",
+    "Feature deep research with multi-competitor implementation analysis",
+    "Recursive build graphs that break features into implementable tasks",
+    "AgentForge: agentic coding automation that creates GitHub PRs autonomously",
+    "Competitive signal intelligence with real-time company monitoring",
+    "AI chat agent with access to 1000+ integrations via Composio",
+    "One-tap export to Linear, Jira, Slack, Notion, and GitHub",
+    "Event-driven automations triggered by research, builds, and signals",
+    "Real-time streaming via NDJSON and multiplexed WebSocket",
+    "Daily rolling credit system with per-user fair scheduling"
+  ],
+  "publicApiSurface": [
+    "POST /projects/research",
+    "POST /research",
+    "GET /research/{job_id}/events",
+    "POST /feature-research",
+    "GET /feature-research/{job_id}/results",
+    "POST /build-graphs",
+    "GET /build-graphs/{graph_id}/events",
+    "POST /build-nodes/{node_id}/expand",
+    "POST /build-nodes/{node_id}/implement",
+    "POST /build-nodes/{node_id}/ticket",
+    "POST /forge/tasks",
+    "GET /forge/runs/{run_id}/events",
+    "POST /forge/runs/{run_id}/approve",
+    "POST /chat",
+    "GET /signals",
+    "POST /signals/companies",
+    "GET /signals/monitors",
+    "POST /build-graphs/{graph_id}/ship",
+    "POST /automations",
+    "GET /ws",
+    "POST /auth/session",
+    "GET /auth/bootstrap",
+    "GET /profile/integrations",
+    "PUT /secrets"
+  ]
+}

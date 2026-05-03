@@ -1,0 +1,545 @@
+---
+title: "Build graphs: generate, stream events, ship, and export"
+description: "Generate AI build graphs from features, stream construction events in real time, ship nodes to Linear, Jira, Slack, Notion, or GitHub, and export the build plan as PDF."
+---
+
+Build graphs are recursive, AI-generated work trees that decompose your product features into actionable build nodes. You create a graph by submitting a set of features and a product idea; ManticScore runs an LLM pipeline and emits nodes over a streaming NDJSON connection as they are created. Once a graph reaches `ready` status, you can expand individual nodes, update metadata, link additional research, and ship the entire tree to your preferred project management tool in a single request.
+
+## POST /build-graphs
+
+Creates a new build graph and immediately returns a `graph_id`. Generation runs in the background — subscribe to the events stream to follow progress.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/build-graphs \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idea": "A mobile app that lets indie coffee shops manage loyalty programs",
+    "features": [
+      {"id": "feat_1", "label": "Loyalty card stamping", "source": "research"},
+      {"id": "feat_2", "label": "Customer rewards dashboard", "source": "research"}
+    ],
+    "project_id": "a1b2c3d4-0000-0000-0000-000000000001",
+    "auto_select": false
+  }'
+```
+
+```python Python
+import httpx
+
+response = httpx.post(
+    "https://api.manticscore.com/build-graphs",
+    headers={"Authorization": f"Bearer {session_token}"},
+    json={
+        "idea": "A mobile app that lets indie coffee shops manage loyalty programs",
+        "features": [
+            {"id": "feat_1", "label": "Loyalty card stamping", "source": "research"},
+            {"id": "feat_2", "label": "Customer rewards dashboard", "source": "research"},
+        ],
+        "project_id": "a1b2c3d4-0000-0000-0000-000000000001",
+        "auto_select": False,
+    },
+)
+graph_id = response.json()["graph_id"]
+```
+
+</CodeGroup>
+
+**Request body**
+
+<ParamField body="idea" type="string" required>
+  The product idea used to prime the LLM. Maximum 5,000 characters.
+</ParamField>
+
+<ParamField body="features" type="object[]">
+  Features to include in the build graph. Each object must have `id`, `label`, and `source` string fields. Required unless `auto_select` is `true`.
+
+  <Expandable title="feature object properties">
+    <ParamField body="features[].id" type="string" required>
+      Unique identifier for the feature, typically from a research or feature-research job.
+    </ParamField>
+    <ParamField body="features[].label" type="string" required>
+      Human-readable feature name displayed as the node label.
+    </ParamField>
+    <ParamField body="features[].source" type="string" required>
+      Where the feature originated. Common values: `"research"`, `"feature_research"`, `"manual"`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="auto_select" type="boolean" default="false">
+  When `true`, ManticScore reads `build_readiness` from the linked research job and selects features automatically. You must provide either explicit `features` or set `auto_select: true`.
+</ParamField>
+
+<ParamField body="phase" type="number | null" default="null">
+  Set to `1` to limit auto-selected features to phase_1 items only. Ignored when `auto_select` is `false`.
+</ParamField>
+
+<ParamField body="project_id" type="string | null">
+  UUID of the project to attach this graph to. Optional — you can link a graph to a project later via `PATCH /build-graphs/{graph_id}`.
+</ParamField>
+
+<ParamField body="research_id" type="string | null">
+  UUID of a specific research job to use as context. Optional.
+</ParamField>
+
+<ParamField body="feature_research_id" type="string | null">
+  UUID of a feature research job whose results are injected into the LLM prompt. If omitted and a `project_id` is supplied, ManticScore auto-detects the latest completed feature research for that project.
+</ParamField>
+
+**Response**
+
+```json 201 response
+{
+  "graph_id": "a1b2c3d4-0000-0000-0000-000000000002",
+  "status": "initializing"
+}
+```
+
+<ResponseField name="graph_id" type="string" required>
+  UUID of the newly created graph. Use this to subscribe to the events stream and retrieve the graph once ready.
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  Always `"initializing"` on creation. The graph transitions to `generating` and then `ready` as the background pipeline runs.
+</ResponseField>
+
+**Error responses**
+
+| Status | Cause |
+|--------|-------|
+| `400` | No features provided and `auto_select` is `false` |
+| `400` | `auto_select` is `true` but the linked research has no `build_readiness` data |
+
+---
+
+## GET /build-graphs/{graph_id}/events
+
+Stream NDJSON progress events for a build graph. Supports cursor-based replay so you can reconnect without missing events.
+
+<Note>
+  This endpoint uses **Stream** auth — the same session token as other endpoints, but the server extends the TTL on connect to keep long-running streams alive.
+</Note>
+
+<CodeGroup>
+
+```bash curl
+curl -N "https://api.manticscore.com/build-graphs/GRAPH_ID/events?cursor=0" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+**Query parameters**
+
+<ParamField query="cursor" type="number" default="0">
+  Resume from this event sequence number. Pass the last `seq` you received to replay only missed events after a disconnect.
+</ParamField>
+
+**Event reference**
+
+Each line is a JSON object: `{"v": 1, "event": "<type>", "data": {...}}`.
+
+<AccordionGroup>
+  <Accordion title="stream_start">
+    Emitted immediately on connect.
+
+    ```json
+    {"v": 1, "event": "stream_start", "data": {"request_id": "req_abc123", "job_id": "job_xyz789"}}
+    ```
+
+    <ResponseField name="request_id" type="string">Trace ID for this connection. Include in bug reports.</ResponseField>
+    <ResponseField name="job_id" type="string">Internal job identifier for the generation pipeline.</ResponseField>
+  </Accordion>
+
+  <Accordion title="graph_created">
+    Fired once the graph row is persisted in the database.
+
+    ```json
+    {"v": 1, "event": "graph_created", "data": {"graph_id": "...", "project_id": "...|null"}}
+    ```
+  </Accordion>
+
+  <Accordion title="stage">
+    Signals the start or completion of the LLM generation stage.
+
+    ```json
+    {"v": 1, "event": "stage", "data": {"name": "llm", "status": "started"}}
+    ```
+
+    <ResponseField name="name" type="string">Always `"llm"` for build graph generation.</ResponseField>
+    <ResponseField name="status" type="string">`"started"` or `"completed"`.</ResponseField>
+  </Accordion>
+
+  <Accordion title="node_created">
+    Emitted for each node as it is written to the database during generation.
+
+    ```json
+    {
+      "v": 1,
+      "event": "node_created",
+      "data": {
+        "id": "node_uuid",
+        "graph_id": "graph_uuid",
+        "parent_id": "parent_uuid|null",
+        "node_key": "auth.oauth",
+        "depth": 1,
+        "sort_order": 0,
+        "name": "OAuth integration",
+        "description": "Implement OAuth 2.0 login flow",
+        "risk": "yellow",
+        "node_status": "collapsed"
+      }
+    }
+    ```
+
+    <ResponseField name="risk" type="string">`"green"`, `"yellow"`, or `"red"` — AI-assessed implementation risk.</ResponseField>
+    <ResponseField name="node_status" type="string">`"collapsed"` for expandable nodes, `"leaf"` for terminal nodes.</ResponseField>
+  </Accordion>
+
+  <Accordion title="graph_ready">
+    Emitted when all root nodes have been created and the graph is ready for use.
+
+    ```json
+    {"v": 1, "event": "graph_ready", "data": {"graph_id": "...", "root_count": 5, "duration_ms": 8423}}
+    ```
+  </Accordion>
+
+  <Accordion title="expand_start / expand_done">
+    Fired when a node expansion begins and completes during the initial generation sweep.
+
+    ```json
+    {"v": 1, "event": "expand_start", "data": {"node_id": "...", "depth": 1}}
+    {"v": 1, "event": "expand_done", "data": {"node_id": "...", "children_count": 4}}
+    ```
+  </Accordion>
+
+  <Accordion title="error">
+    Signals a pipeline failure.
+
+    ```json
+    {"v": 1, "event": "error", "data": {"code": "LLM_TIMEOUT", "message": "Generation timed out", "retryable": true}}
+    ```
+
+    <ResponseField name="retryable" type="boolean">When `true`, you can safely retry the originating request.</ResponseField>
+  </Accordion>
+
+  <Accordion title="done">
+    Always the final event on the stream, whether successful or not.
+
+    ```json
+    {"v": 1, "event": "done", "data": {}}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+  Parse on the `event` field and ignore types you don't recognize. The protocol is forward-compatible and new event types may be added without a version bump.
+</Tip>
+
+---
+
+## GET /build-graphs
+
+List build graphs, optionally scoped to a project.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/build-graphs?project_id=PROJECT_UUID&limit=20&offset=0" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+**Query parameters**
+
+<ParamField query="project_id" type="string">
+  Filter results to graphs attached to this project UUID.
+</ParamField>
+
+<ParamField query="limit" type="number" default="50">
+  Maximum number of graphs to return. Maximum value: 100.
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of graphs to skip for pagination.
+</ParamField>
+
+```json 200 response
+[
+  {
+    "id": "a1b2c3d4-0000-0000-0000-000000000002",
+    "title": "Loyalty App Build Graph",
+    "status": "ready",
+    "created_at": "2026-04-19T10:30:00Z"
+  }
+]
+```
+
+<ResponseField name="status" type="string">
+  One of `"initializing"`, `"generating"`, `"ready"`, or `"failed"`.
+</ResponseField>
+
+---
+
+## GET /build-graphs/{graph_id}
+
+Retrieve a specific graph with its full node tree.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/build-graphs/GRAPH_ID" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "a1b2c3d4-0000-0000-0000-000000000002",
+  "title": "Loyalty App Build Graph",
+  "status": "ready",
+  "source": "user",
+  "selected_features": [
+    {"id": "feat_1", "label": "Loyalty card stamping", "source": "research"}
+  ],
+  "nodes": [
+    {
+      "id": "node_uuid",
+      "name": "Authentication",
+      "depth": 0,
+      "node_status": "collapsed",
+      "children": []
+    }
+  ]
+}
+```
+
+<Note>
+  `GET /build-graphs/{graph_id}` returns the node tree under the key `"nodes"`. The shortcut endpoint `GET /projects/{project_id}/build-graph` returns the same tree under `"roots"` instead.
+</Note>
+
+<ResponseField name="id" type="string" required>UUID of the graph.</ResponseField>
+<ResponseField name="title" type="string" required>Auto-generated graph title derived from the product idea.</ResponseField>
+<ResponseField name="status" type="string" required>Current graph status.</ResponseField>
+<ResponseField name="source" type="string">
+  How the graph was created. `"user"` for graphs created via `POST /build-graphs`, `"research_auto_seeded"` for graphs auto-created by the server when an attached research run completed with a quality score of `70` or higher. Auto-seeded graphs are pre-populated with the top 5 features from the research and start in `status: "ready"`; you can expand any node immediately or treat the graph as a starting point and edit it.
+</ResponseField>
+<ResponseField name="selected_features" type="object[]">
+  The features used to generate this graph.
+  <Expandable title="properties">
+    <ResponseField name="id" type="string">Feature identifier.</ResponseField>
+    <ResponseField name="label" type="string">Feature label.</ResponseField>
+    <ResponseField name="source" type="string">Feature origin.</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="nodes" type="object[]">
+  Root-level nodes of the build tree. Each node may contain nested `children`. See [Build nodes](/api-reference/build-nodes) for the full node shape.
+</ResponseField>
+
+---
+
+## PATCH /build-graphs/{graph_id}
+
+Update a graph's project association or title.
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/build-graphs/GRAPH_ID" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "v2 Build Plan", "project_id": "a1b2c3d4-0000-0000-0000-000000000001"}'
+```
+
+</CodeGroup>
+
+<ParamField body="title" type="string | null">
+  New title for the graph. Pass `null` to leave unchanged.
+</ParamField>
+
+<ParamField body="project_id" type="string | null">
+  UUID of the project to link, or `null` to detach the graph from its current project.
+</ParamField>
+
+The response is the full updated graph row.
+
+---
+
+## DELETE /build-graphs/{graph_id}
+
+Permanently deletes the graph and all its nodes.
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE "https://api.manticscore.com/build-graphs/GRAPH_ID" \
+  -H "Authorization: Bearer <session_token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{"success": true}
+```
+
+---
+
+## POST /build-graphs/{graph_id}/sources
+
+Link an additional research job to a graph as a supplementary context source.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/build-graphs/GRAPH_ID/sources" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"research_id": "RESEARCH_UUID", "link_type": "supplement"}'
+```
+
+</CodeGroup>
+
+<ParamField body="research_id" type="string" required>
+  UUID of the research job to link.
+</ParamField>
+
+<ParamField body="link_type" type="string" required>
+  Relationship between the research and this graph. One of `"context"`, `"supplement"`, or `"external"`.
+</ParamField>
+
+```json 201 response
+{
+  "graph_id": "GRAPH_UUID",
+  "research_id": "RESEARCH_UUID",
+  "link_type": "supplement"
+}
+```
+
+| Status | Cause |
+|--------|-------|
+| `409` | This research job is already linked to this graph |
+
+---
+
+## POST /build-graphs/{graph_id}/ship
+
+Export the entire graph to an external platform in a single request. ManticScore uses your saved integration defaults — no extra configuration required after initial connection.
+
+<CodeGroup>
+
+```bash curl (Linear)
+curl -X POST "https://api.manticscore.com/build-graphs/GRAPH_ID/ship" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "linear", "top_level_only": false}'
+```
+
+```bash curl (Slack)
+curl -X POST "https://api.manticscore.com/build-graphs/GRAPH_ID/ship" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "slack", "channel": "C012AB3CD"}'
+```
+
+```bash curl (GitHub)
+curl -X POST "https://api.manticscore.com/build-graphs/GRAPH_ID/ship" \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"target": "github", "repo": "acme/loyalty-app"}'
+```
+
+</CodeGroup>
+
+<ParamField body="target" type="string" required>
+  Export destination. One of `"linear"`, `"jira"`, `"slack"`, `"notion"`, or `"github"`.
+</ParamField>
+
+<ParamField body="top_level_only" type="boolean" default="false">
+  When `true`, only root-level nodes are exported. When `false`, all nodes in the tree are included.
+</ParamField>
+
+<ParamField body="team_id" type="string | null">
+  Linear team ID. Falls back to your saved Linear default when omitted.
+</ParamField>
+
+<ParamField body="project_key" type="string | null">
+  Jira project key. Falls back to your saved Jira default when omitted.
+</ParamField>
+
+<ParamField body="channel" type="string | null">
+  Slack channel ID or name. Falls back to your saved Slack default when omitted.
+</ParamField>
+
+<ParamField body="repo" type="string | null">
+  GitHub repository in `owner/name` format. Required for the `"github"` target.
+</ParamField>
+
+**Response by target**
+
+<Tabs>
+  <Tab title="Linear / Jira">
+    ```json
+    {
+      "total": 12,
+      "created": 12,
+      "issues": [
+        {"id": "LIN-123", "title": "OAuth integration", "url": "https://linear.app/..."}
+      ]
+    }
+    ```
+  </Tab>
+  <Tab title="Slack">
+    ```json
+    {"sent": true, "channel": "C012AB3CD"}
+    ```
+  </Tab>
+  <Tab title="Notion">
+    ```json
+    {"page": {"id": "notion_page_id", "url": "https://notion.so/..."}}
+    ```
+  </Tab>
+  <Tab title="GitHub">
+    ```json
+    {"run_id": "forge_run_uuid", "status": "queued"}
+    ```
+
+    GitHub export kicks off a Forge run that creates a PR from the build tree. Track progress via `GET /forge/runs/{run_id}/events`. See [Forge](/api-reference/forge) for full event documentation.
+  </Tab>
+</Tabs>
+
+<Warning>
+  A `400` response means the target integration is not connected or has no default configuration saved. Connect the integration and configure defaults at `PATCH /profile/integrations/{toolkit}/defaults` before calling ship.
+</Warning>
+
+---
+
+## GET /build-graphs/{graph_id}/export
+
+Downloads the build graph as a binary PDF file. The export flattens the recursive node tree into an indented bullet list and includes the build order rationale and overall graph status. The graph is scoped to the authenticated user. If WeasyPrint is unavailable on the server, the endpoint falls back to a plain-text export.
+
+<ParamField query="format" type="string" default="pdf">
+  Export format. Currently only `pdf` is supported.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/build-graphs/GRAPH_ID/export?format=pdf" \
+  -H "Authorization: Bearer <token>" \
+  --output build-plan.pdf
+```
+
+</CodeGroup>
+
+The response is binary content with `Content-Type: application/pdf` and a `Content-Disposition: attachment` header naming the file `<idea>-build-plan.pdf`. Sections rendered in order: `build_order_rationale`, `nodes` (indented hierarchy of titles + summaries), and `status`.
+
+| Status | Meaning |
+|--------|---------|
+| `200`  | PDF (or `text/plain` fallback) returned. |
+| `404`  | Build graph not found or owned by another user. |
+| `422`  | Unsupported `format` value. |

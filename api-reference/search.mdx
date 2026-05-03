@@ -1,0 +1,142 @@
+---
+title: "Search API — semantic project and research discovery"
+description: "Find projects and research by meaning, not keywords. Queries match semantically — you see your own data plus public research, never other users' private content."
+---
+
+The Search API lets you find projects and research using natural language rather than exact keyword matching. A query like "mobile banking for gig workers" will surface projects about freelancer payroll or earned wage access — not just ones with those exact words. Results respect your privacy settings — you only see your own projects plus any research others have explicitly made public.
+
+## Semantic search
+
+Search across projects and completed research by meaning. A query like "mobile banking for gig workers" will surface projects about freelancer payroll, contractor invoicing, and earned wage access — not just ones with those exact words.
+
+<ParamField query="q" type="string" required>
+  Search query. Between 1 and 500 characters.
+</ParamField>
+
+<ParamField query="limit" type="number" default="10">
+  Maximum results to return. Upper bound: 50.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/search?q=fintech+budgeting&limit=10" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/projects/search",
+    headers={"Authorization": "Bearer <token>"},
+    params={"q": "fintech budgeting", "limit": 10},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+[
+  {
+    "id": "9f4e2a1b-...",
+    "idea": "AI expense tracker for freelancers",
+    "category": "fintech",
+    "similarity": 0.9234,
+    "is_own": true
+  },
+  {
+    "id": "b7d3c1e9-...",
+    "idea": "Smart budgeting app for contract workers",
+    "category": "fintech",
+    "similarity": 0.8811,
+    "is_own": false
+  }
+]
+```
+
+<ResponseField name="id" type="string" required>
+  UUID of the matching project or research job.
+</ResponseField>
+
+<ResponseField name="idea" type="string" required>
+  The product idea text used to generate the embedding.
+</ResponseField>
+
+<ResponseField name="category" type="string">
+  High-level category assigned during research (e.g. `fintech`, `devtools`). `null` if not yet categorized.
+</ResponseField>
+
+<ResponseField name="similarity" type="number" required>
+  Cosine similarity score between 0 and 1. Higher values indicate a closer semantic match. Scores above 0.85 are typically strong matches.
+</ResponseField>
+
+<ResponseField name="is_own" type="boolean" required>
+  `true` if the result belongs to the authenticated user. `false` means it is public research from another user.
+</ResponseField>
+
+<Note>
+  Results include your own data plus research that others have set to `reuse_scope: public`. Private research from other users is never returned, regardless of similarity score.
+</Note>
+
+Returns `503` if the semantic search service is temporarily unavailable. Retry after a moment.
+
+---
+
+## Find similar projects
+
+Given a specific project, find other projects and research with semantically similar ideas. This endpoint uses a pre-computed embedding for the project, so it is fast and returns results immediately.
+
+<ParamField query="limit" type="number" default="5">
+  Maximum results to return. Upper bound: 20.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/projects/9f4e2a1b-.../similar?limit=5" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/projects/9f4e2a1b-.../similar",
+    headers={"Authorization": "Bearer <token>"},
+    params={"limit": 5},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+[
+  {
+    "id": "b7d3c1e9-...",
+    "idea": "Smart budgeting app for contract workers",
+    "category": "fintech",
+    "similarity": 0.8811,
+    "is_own": false
+  }
+]
+```
+
+The response shape is identical to the semantic search endpoint.
+
+<Warning>
+  Returns `422` if the project does not have an embedding yet. Embeddings are generated asynchronously when research completes. Wait for the research pipeline to finish before calling this endpoint on a new project.
+</Warning>
+
+---
+
+## How semantic search works
+
+ManticScore generates a semantic representation of each project idea text automatically when research completes. The search index includes:
+
+- Your own projects and research jobs (all visibility settings)
+- Other users' research that has been set to `reuse_scope: public`
+
+Search indexes are built asynchronously after each research run finishes. Until the index is ready, a project will not appear in search results or the similar endpoint — typically a few seconds after research completes.

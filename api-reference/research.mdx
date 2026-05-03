@@ -1,0 +1,526 @@
+---
+title: "Research API — pipelines, streaming, sharing, exports, and diffs"
+description: "Start market or feature research pipelines, stream live progress, compare versions, generate remix ideas, control reuse visibility, share results publicly, and export completed research as PDF."
+---
+
+The Research API runs a five-stage pipeline — interpret, search, judge, analyze, synthesize — and returns results via cursor-resumable NDJSON streams. You can start a standalone research job and optionally attach it to a project, or use `POST /projects/research` to do both atomically. Every `POST /research` call returns immediately; the pipeline runs in the background and you consume progress through the events endpoint.
+
+## Start research
+
+<ParamField body="idea" type="string" required>
+  The product idea or question to research. Maximum 5,000 characters.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  UUID of an existing project to attach the research to. Pass `null` to create unattached research.
+</ParamField>
+
+<ParamField body="mode" type="string" default="market">
+  Pipeline mode. Use `market` for a full competitive landscape analysis. Use `feature` to focus on feature analysis — this automatically chains into feature deep research on the top 5 features after the market research completes.
+</ParamField>
+
+<Note>
+  The rate limit is **10 requests per minute**. If you're rate-limited with a valid session token, ManticScore queues the request automatically (up to 5 per user) and retries it when capacity is available — you don't need to retry manually.
+</Note>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/research \
+  -H "Authorization: Bearer <token>" \
+  -H "Idempotency-Key: idea-v1-2026-04-19" \
+  -H "Content-Type: application/json" \
+  -d '{"idea": "AI expense tracker for freelancers", "project_id": "9f4e2a1b-...", "mode": "market"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/research",
+    headers={
+        "Authorization": "Bearer <token>",
+        "Idempotency-Key": "idea-v1-2026-04-19",
+    },
+    json={
+        "idea": "AI expense tracker for freelancers",
+        "project_id": "9f4e2a1b-...",
+        "mode": "market",
+    },
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+<Tabs>
+  <Tab title="202 — queued">
+    ```json
+    {
+      "job_id": "7c3d1e9a-...",
+      "status": "queued",
+      "position": 0
+    }
+    ```
+    The job is queued. Stream progress from `GET /research/{job_id}/events`.
+  </Tab>
+  <Tab title="200 — cache hit">
+    ```json
+    {
+      "job_id": "4a8b2f1c-...",
+      "cache_action": "clone",
+      "status": "completed"
+    }
+    ```
+    An identical idea was already researched by you or another user with public scope. The prior result was cloned instantly.
+  </Tab>
+  <Tab title="200 — idempotency replay">
+    ```json
+    {
+      "job_id": "7c3d1e9a-...",
+      "status": "in_progress"
+    }
+    ```
+    You sent the same `Idempotency-Key` again. The server replays the original response state without starting a new pipeline.
+  </Tab>
+</Tabs>
+
+<Warning>
+  A `409` means an identical request is already running. A `429` means you've hit the rate limit — if using a session token, your request may have been captured to the retry queue.
+</Warning>
+
+---
+
+## Stream research events
+
+Subscribe to the live NDJSON stream for a research job. The cursor parameter lets you resume from any point — the server replays all events since that sequence number before switching to live delivery.
+
+<ParamField query="cursor" type="number" default="0">
+  Sequence number to resume from. Use `0` to start from the beginning.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -N "https://api.manticscore.com/research/7c3d1e9a-.../events?cursor=0" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+with httpx.stream(
+    "GET",
+    "https://api.manticscore.com/research/7c3d1e9a-.../events",
+    headers={"Authorization": "Bearer <token>"},
+    params={"cursor": 0},
+) as resp:
+    for line in resp.iter_lines():
+        if line:
+            print(line)
+```
+
+</CodeGroup>
+
+Each line is a JSON object with shape `{"v": 1, "event": "<type>", "data": {...}}`. The event types are:
+
+| Event | Description |
+|-------|-------------|
+| `stream_start` | Connection confirmed. Contains `request_id` and `job_id`. |
+| `stage` | A pipeline stage started, completed, or failed. See stage names below. |
+| `progress` | Free-text progress message within a stage. |
+| `retry` | A stage is being retried. Contains `attempt` number and `source`. |
+| `result` | Research completed. Contains the full research artifact. |
+| `error` | A fatal error occurred. Contains `message`, `code`, and `retryable`. |
+| `done` | Stream is closed. Always the last event. |
+
+Pipeline stage names: `interpret`, `search`, `judge`, `analyze`, `synthesize`, `persist`.
+
+<Note>
+  The `judge` stage runs between `search` and `analyze` when retrieval quality scoring is enabled. It is non-blocking — if it fails, the pipeline continues to `analyze` regardless.
+</Note>
+
+<Note>
+  **Auto-seeded build graph on completion.** When research finishes with a quality score of `70` or higher and the attached project has no existing build graph, the server automatically creates a draft build graph seeded with the top 5 features from the research. The graph is created with `status: "ready"` and `source: "research_auto_seeded"` and emits its events on the [`build` channel](/streaming/websocket). Lower-quality research (`< 70`) and projects that already have a graph are skipped — you can still create one manually via [`POST /build-graphs`](/api-reference/build-graphs). This is a fire-and-forget hook; if it fails the research result is not affected.
+</Note>
+
+<Tip>
+  Parse on the `event` field and ignore unknown types. New event types may be added without a version bump.
+</Tip>
+
+---
+
+## Get research status
+
+Returns the current status and the last event sequence number without opening a stream.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/research/7c3d1e9a-.../status" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "job_id": "7c3d1e9a-...",
+  "status": "running",
+  "last_event_seq": 15,
+  "error": null
+}
+```
+
+<ResponseField name="status" type="string" required>
+  One of `queued`, `running`, `completed`, `failed`.
+</ResponseField>
+
+<ResponseField name="last_event_seq" type="number" required>
+  Use this as the `cursor` value when reconnecting to the events stream to avoid replaying events you've already processed.
+</ResponseField>
+
+<ResponseField name="error" type="object">
+  Present only when `status` is `failed`. Contains `code`, `message`, and `retryable`.
+
+  Common research error codes:
+
+  - `EMPTY_OUTPUT` — The pipeline ran end-to-end, gathered no supporting evidence, and produced zero incumbents, zero emerging players, and zero features. This typically means the submitted idea was a meta-description, gibberish, or too narrow to research. Returned with `retryable: false` — re-running the same input will produce the same result. Surface the `message` to the user and prompt them to submit a more specific product idea.
+  - `MODEL_EMPTY_DESPITE_EVIDENCE` — The pipeline collected supporting evidence but the model still returned zero incumbents, zero emerging players, and zero features (and a strict-mode retry also returned empty). This is distinct from `EMPTY_OUTPUT`: the input was researchable, but the model failed to extract structured competitors from the source material. Returned with `retryable: false`. Surface the `message` and suggest the user rephrase the idea as a specific product or feature.
+  - `EMPTY_INPUT` — The submitted idea was rejected before the pipeline ran (for example, missing or whitespace-only body text). Returned with `retryable: false`.
+
+  Both `EMPTY_OUTPUT` and `MODEL_EMPTY_DESPITE_EVIDENCE` errors include an `evidence_count` field on the error payload reporting how many sources the pipeline gathered before the analyze stage failed.
+</ResponseField>
+
+---
+
+## List queued retries
+
+Returns the authenticated user's pending DLQ rows — research requests that hit the rate limit and were captured for later replay. iOS surfaces this list as "you have N queued retries". Items expire silently after 24 hours.
+
+Rate limit: **30 requests per minute**.
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/research/queued \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/research/queued",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "count": 2,
+  "items": [
+    {
+      "id": "8d2f1c4b-...",
+      "idea": "AI expense tracker for freelancers",
+      "project_id": "9f4e2a1b-...",
+      "mode": "market",
+      "queued_at": "2026-04-26T09:31:12Z"
+    },
+    {
+      "id": "0a1c8e5d-...",
+      "idea": "Voice-controlled task manager",
+      "project_id": null,
+      "mode": "feature",
+      "queued_at": "2026-04-26T10:14:48Z"
+    }
+  ]
+}
+```
+
+<ResponseField name="count" type="number" required>
+  Number of pending entries returned. Capped to entries created within the last 24 hours.
+</ResponseField>
+
+<ResponseField name="items" type="array" required>
+  <Expandable title="properties">
+    <ResponseField name="id" type="string" required>
+      DLQ row UUID.
+    </ResponseField>
+    <ResponseField name="idea" type="string" required>
+      Original idea text submitted with the rate-limited request.
+    </ResponseField>
+    <ResponseField name="project_id" type="string">
+      UUID of the project the user attempted to attach research to, or `null`.
+    </ResponseField>
+    <ResponseField name="mode" type="string" required>
+      Pipeline mode the user requested. One of `market` or `feature`.
+    </ResponseField>
+    <ResponseField name="queued_at" type="string" required>
+      ISO 8601 timestamp at which the request was captured to the queue.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  Pending items are replayed automatically when capacity frees up — this endpoint is read-only and exists so clients can show a "queued retries" badge to the user.
+</Note>
+
+---
+
+## Attach research to a project
+
+Associates an existing research job with a project. Useful if you started research without a `project_id` and want to link it after the fact.
+
+<ParamField body="project_id" type="string" required>
+  UUID of the project to attach this research job to.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/research/7c3d1e9a-..." \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": "9f4e2a1b-..."}'
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "job_id": "7c3d1e9a-...",
+  "project_id": "9f4e2a1b-..."
+}
+```
+
+---
+
+## Diff research versions
+
+Compare the current research version against the previous one to see what changed between runs.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/research/7c3d1e9a-.../diff" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "diff_available": true,
+  "current_version": 2,
+  "previous_version": 1,
+  "competitors": {
+    "added": ["Fyle"],
+    "removed": [],
+    "unchanged": 3
+  },
+  "features": {
+    "added": ["GPS mileage tracking"],
+    "removed": ["Manual entry mode"],
+    "unchanged": 5
+  },
+  "recommendation_changed": false
+}
+```
+
+If no previous version exists: `{"diff_available": false, "reason": "No previous version to compare against"}`.
+
+---
+
+## Remix: get adjacent ideas
+
+Generates three pivot ideas related to the completed research. Each suggestion includes a rationale and an explanation of how it differentiates from the original idea.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/research/7c3d1e9a-.../remix" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "suggestions": [
+    {
+      "idea": "AI mileage tracker for gig workers",
+      "rationale": "Gig workers have higher mileage deduction complexity than freelancers.",
+      "differentiation": "Focuses on vehicle tax deductions rather than receipt capture."
+    }
+  ]
+}
+```
+
+---
+
+## Control visibility (reuse scope)
+
+Set whether your research can be used as a cache source for other users. `user` means only you can reuse it; `public` makes it available to the global cache.
+
+### Update one job
+
+<ParamField body="reuse_scope" type="string" required>
+  Either `user` (private) or `public`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/research/7c3d1e9a-.../scope" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"reuse_scope": "public"}'
+```
+
+</CodeGroup>
+
+### Update all completed research at once
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/research/scope/bulk \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"reuse_scope": "public"}'
+```
+
+</CodeGroup>
+
+```json 200 response
+{"updated": 5}
+```
+
+---
+
+## Share research publicly
+
+Creates a public share link for a completed research job. The link is served as an App Clip page at `manticscore.com/clip/research-...`.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/research/7c3d1e9a-.../share" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "share_token": "abc123xyz",
+  "share_url": "https://manticscore.com/clip/research-abc123xyz",
+  "expires_at": "2026-05-19T10:00:00Z"
+}
+```
+
+Returns `400` if the research is not yet completed.
+
+### Read shared research (public)
+
+Anyone with the share token can read the research without authentication.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/research/shared/abc123xyz" \
+  -H "Accept: application/json"
+```
+
+</CodeGroup>
+
+By default the endpoint returns HTML. Pass `Accept: application/json` to get the JSON response.
+
+### Revoke a share link
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE "https://api.manticscore.com/research/7c3d1e9a-.../share" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{"revoked": true}
+```
+
+---
+
+## Analyze a competitor feature
+
+Reverse-engineers a specific feature from a named competitor. Returns a structured analysis covering UX flow, technical approach, implementation challenges, open-source alternatives, and a build estimate.
+
+Rate limit: **5 requests per minute**.
+
+<ParamField body="company" type="string" required>
+  The competitor's name. Maximum 200 characters.
+</ParamField>
+
+<ParamField body="feature" type="string" required>
+  The feature to analyze. Maximum 500 characters.
+</ParamField>
+
+<ParamField body="context" type="string">
+  Additional context about your own product or constraints. Maximum 2,000 characters.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  Optional project UUID to scope the analysis.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/research/feature-analysis \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "company": "Expensify",
+    "feature": "SmartScan OCR receipt capture",
+    "context": "Building for freelancers who need to track deductible expenses",
+    "project_id": "9f4e2a1b-..."
+  }'
+```
+
+</CodeGroup>
+
+Returns a structured analysis object. The exact shape depends on the feature, but always includes UX flow, technical approach, known challenges, OSS alternatives, and a build time estimate.
+
+---
+
+## Export to PDF
+
+Downloads a completed research job as a binary PDF file. The export is rendered from the same job artifacts shown in the app — interpretation, incumbents, emerging players, features, white spaces, and signals — and is scoped to the authenticated user. If WeasyPrint is unavailable on the server, the endpoint falls back to a plain-text export.
+
+<ParamField query="format" type="string" default="pdf">
+  Export format. Currently only `pdf` is supported.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/research/7c3d1e9a-.../export?format=pdf" \
+  -H "Authorization: Bearer <token>" \
+  --output research.pdf
+```
+
+</CodeGroup>
+
+The response is binary content with `Content-Type: application/pdf` and a `Content-Disposition: attachment` header naming the file `<idea>-research.pdf`. The PDF includes the research title, creation timestamp, and a `Quality: <score>/100` badge when a quality score is available.
+
+| Status | Meaning |
+|--------|---------|
+| `200`  | PDF (or `text/plain` fallback) returned. |
+| `404`  | Research job not found, owned by another user, or not in `completed` status. |
+| `422`  | Unsupported `format` value. |

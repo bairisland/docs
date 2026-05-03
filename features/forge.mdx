@@ -1,0 +1,255 @@
+---
+title: "Automate coding tasks with agentic AI code generation"
+description: "Describe a coding task and point Forge at a GitHub repo; it plans changes, writes code, and opens a PR. Four modes let you dial in how much automation you want."
+---
+
+Forge is ManticScore's agentic coding automation. You describe what you want built in plain language, point it at a GitHub repository, and Forge handles the rest: it reads the codebase, plans the changes, writes the code, validates its own work, and opens a pull request. You control how much autonomy it has — from analysis-only to fully automatic PR creation — and you can monitor every step in real time through the event stream.
+
+<Note>
+Forge requires a connected GitHub account. Start the OAuth flow at `POST /auth/github/start` before submitting tasks.
+</Note>
+
+## Run modes
+
+Choose the mode that matches how much automation you want:
+
+| Mode | What Forge does |
+|---|---|
+| `analyze_only` | Reads the codebase and produces a plan. No code is written. |
+| `generate_patch` | Writes code edits but does not open a pull request. |
+| `autonomous` | Writes code and pauses for your approval before creating the PR. |
+| `create_pr` | Writes code and creates the pull request automatically, without confirmation. |
+
+## Run lifecycle
+
+A Forge run moves through these statuses in order:
+
+```
+queued → submitted → planning → editing → validating → [awaiting_approval] → creating_pr → completed
+```
+
+The `awaiting_approval` step only appears in `autonomous` mode. In `create_pr` mode the run goes directly from `validating` to `creating_pr`.
+
+## Submitting a task
+
+<Steps>
+  <Step title="Connect GitHub">
+    If you haven't already, start the GitHub OAuth flow:
+
+    ```bash curl
+    curl --request POST \
+      --url https://api.manticscore.com/auth/github/start \
+      --header 'Authorization: Bearer <token>'
+    ```
+
+    Open the returned `auth_url` in a browser to complete authorization.
+  </Step>
+
+  <Step title="Submit the Forge task">
+    Describe the coding task in plain language and specify the target repository.
+
+    <ParamField body="prompt" type="string" required>
+      Natural language description of the coding task. Up to 5,000 characters.
+    </ParamField>
+
+    <ParamField body="repository_name" type="string" required>
+      The GitHub repository to work in, in `owner/name` format.
+    </ParamField>
+
+    <ParamField body="mode" type="string" default="autonomous">
+      Run mode: `analyze_only`, `generate_patch`, `autonomous`, or `create_pr`.
+    </ParamField>
+
+    <ParamField body="project_id" type="string">
+      UUID of an existing ManticScore project. Pass `null` to leave unattached.
+    </ParamField>
+
+    <ParamField body="constraints" type="array">
+      Optional list of constraints the AI should follow, e.g. `["Do not modify existing tests", "Use the existing logger utility"]`.
+    </ParamField>
+
+    <CodeGroup>
+
+    ```bash curl
+    curl --request POST \
+      --url https://api.manticscore.com/forge/tasks \
+      --header 'Authorization: Bearer <token>' \
+      --header 'Content-Type: application/json' \
+      --data '{
+        "prompt": "Add a PDF export endpoint to the invoices API. The endpoint should accept an invoice ID, generate a PDF using the existing template engine, and return it as a file download.",
+        "repository_name": "your-org/your-repo",
+        "mode": "autonomous",
+        "project_id": null,
+        "constraints": [
+          "Use the existing PDFRenderer class in src/utils/pdf.ts",
+          "Do not modify existing invoice tests"
+        ]
+      }'
+    ```
+
+    ```python python
+    import requests
+
+    response = requests.post(
+        "https://api.manticscore.com/forge/tasks",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "prompt": "Add a PDF export endpoint to the invoices API. The endpoint should accept an invoice ID, generate a PDF using the existing template engine, and return it as a file download.",
+            "repository_name": "your-org/your-repo",
+            "mode": "autonomous",
+            "project_id": None,
+            "constraints": [
+                "Use the existing PDFRenderer class in src/utils/pdf.ts",
+                "Do not modify existing invoice tests",
+            ],
+        },
+    )
+    print(response.json())
+    # {"task_id": "uuid", "run_id": "uuid", "status": "queued"}
+    ```
+
+    </CodeGroup>
+
+    **Response 201:**
+
+    ```json
+    {
+      "task_id": "d4e5f6a7-...",
+      "run_id": "e5f6a7b8-...",
+      "status": "queued"
+    }
+    ```
+  </Step>
+
+  <Step title="Stream run progress">
+    Connect to the run's event stream to watch Forge plan and write code in real time.
+
+    ```bash curl
+    curl --request GET \
+      --url 'https://api.manticscore.com/forge/runs/e5f6a7b8-.../events?cursor=0' \
+      --header 'Authorization: Bearer <token>'
+    ```
+  </Step>
+</Steps>
+
+## Streaming run events
+
+The stream follows the [NDJSON v1 protocol](/streaming/ndjson-protocol).
+
+| Event | Description |
+|---|---|
+| `stream_start` | Stream confirmed open |
+| `plan` | Forge's analysis plan for the task |
+| `diff` | Code changes produced during the editing phase |
+| `status_change` | Run moved to a new status (e.g. `planning → editing`) |
+| `tool_call_failed` | A specific tool call failed; includes the tool name and error message |
+| `error` | Non-retryable run failure |
+| `done` | Stream closed |
+
+<Note>
+When a tool call fails, Forge emits a `tool_call_failed` event with the specific tool name and error before surfacing a generic failure. This makes it easier to diagnose integration issues.
+</Note>
+
+## Approving or rejecting a run (autonomous mode)
+
+When a run in `autonomous` mode reaches `awaiting_approval`, you review the plan and diff before the PR is created.
+
+**Approve** — create the PR:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/forge/runs/e5f6a7b8-.../approve \
+  --header 'Authorization: Bearer <token>'
+```
+
+**Reject** — discard the run:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/forge/runs/e5f6a7b8-.../reject \
+  --header 'Authorization: Bearer <token>'
+```
+
+**Cancel** — stop an in-progress run:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/forge/runs/e5f6a7b8-.../cancel \
+  --header 'Authorization: Bearer <token>'
+```
+
+**Retry** — start a new run from the same task (after failure, rejection, or cancellation):
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/forge/runs/e5f6a7b8-.../retry \
+  --header 'Authorization: Bearer <token>'
+```
+
+## Fetching run details and PR info
+
+### List all runs
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/forge/runs \
+  --header 'Authorization: Bearer <token>'
+```
+
+### Get a specific run
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/forge/runs/e5f6a7b8-... \
+  --header 'Authorization: Bearer <token>'
+```
+
+Returns the full run object with a `steps` array and an optional `pull_request` object once the PR has been created.
+
+### Get pull request details
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/forge/pulls/e5f6a7b8-... \
+  --header 'Authorization: Bearer <token>'
+```
+
+```json
+{
+  "id": "uuid",
+  "run_id": "uuid",
+  "repository_name": "your-org/your-repo",
+  "pr_number": 42,
+  "pr_url": "https://github.com/your-org/your-repo/pull/42"
+}
+```
+
+## Using Forge from a build node
+
+If you have a [Build Graph](/features/build-graphs), you can kick off a Forge run directly from any node. ManticScore uses the node's generated spec as the coding prompt:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/build-nodes/node_uuid_here/implement \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "repo": "your-org/your-repo",
+    "mode": "create_pr",
+    "notes": "Make sure to add rate limiting on the new endpoint"
+  }'
+```
+
+When you provide `notes`, ManticScore refines the node's spec with your direction before passing it to Forge.
+
+## Limits and credits
+
+| | Value |
+|---|---|
+| Rate limit | 10 requests / minute (task submission) |
+| Retry rate limit | 5 requests / minute |
+| Credit cost | 2 credits per run |
+
+<Warning>
+Forge requires push access to the target repository. If your GitHub account does not have push access, the task submission returns a `403` error.
+</Warning>

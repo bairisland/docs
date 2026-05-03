@@ -1,0 +1,195 @@
+---
+title: "Error codes, formats, and handling for the ManticScore API"
+description: "Complete reference for HTTP status codes, the standard error body shape, streaming error events, and step-by-step fixes for the most common errors you'll encounter."
+---
+
+Every error the ManticScore API returns follows the same structure: an HTTP status code that tells you the class of problem, a JSON body with a human-readable `detail` string, and an `X-Request-ID` response header you can use to trace the request server-side. Understanding these patterns lets you write error handling once and apply it everywhere.
+
+## Error body format
+
+All error responses use `application/json` with the following shape:
+
+```json
+{
+  "detail": "Human-readable error message"
+}
+```
+
+For `500 Internal server error` responses, the body also includes the request ID:
+
+```json
+{
+  "detail": "Internal server error",
+  "request_id": "4a7f2c8e1d903b56"
+}
+```
+
+<Note>
+  Every response — including successful ones — includes an `X-Request-ID` header. Save this value when you catch an error; it's the fastest way to get help from support.
+</Note>
+
+## HTTP status codes
+
+| Code | Meaning |
+|------|---------|
+| `200` | Success |
+| `201` | Created — a new resource was persisted |
+| `202` | Accepted — an async job was queued; poll or stream for results |
+| `204` | No content — typically returned by `DELETE` endpoints |
+| `302` | Redirect — used in OAuth flows; not called by your app directly |
+| `400` | Bad request — missing or structurally invalid input |
+| `401` | Unauthorized — missing, expired, or invalid auth token |
+| `403` | Forbidden — valid auth but insufficient permission (ownership check, missing GitHub connection) |
+| `404` | Not found — the resource doesn't exist or doesn't belong to your account |
+| `409` | Conflict — idempotency collision, duplicate job, or invalid state transition |
+| `413` | Payload too large — request body exceeded the size limit |
+| `422` | Unprocessable — input is structurally valid but a field value is invalid |
+| `429` | Too many requests — rate limit exceeded; check the `Retry-After` header |
+| `500` | Internal server error — unexpected failure on our side |
+| `502` | Bad gateway — an external service (GitHub, Composio) returned an error |
+| `503` | Service unavailable — a dependency is down (JWKS not loaded, embedding service unreachable) |
+
+## Common errors and how to fix them
+
+### 401 — Missing Bearer token
+
+You sent a request to a protected endpoint without an `Authorization` header.
+
+**Fix:** Add `Authorization: Bearer <session_token>` to your request. If you don't have a session token yet, see [Authentication](/api-reference/authentication).
+
+<CodeGroup>
+
+```bash curl
+# Incorrect
+curl https://api.manticscore.com/projects
+
+# Correct
+curl https://api.manticscore.com/projects \
+  -H "Authorization: Bearer ms_sess_a1b2c3d4e5f6..."
+```
+
+</CodeGroup>
+
+### 401 — Token expired
+
+Your session token has passed its 30-minute TTL.
+
+**Fix:** Call `POST /auth/session` with a fresh Clerk JWT to get a new session token, then retry the original request.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/session \
+  -H "Authorization: Bearer <new_clerk_jwt>"
+```
+
+</CodeGroup>
+
+<Tip>
+  Refresh proactively — call `POST /auth/session` a few minutes before the token expires rather than waiting for a `401`. Store the `expires_in` value and set a timer.
+</Tip>
+
+### 409 — Identical research request already in progress
+
+You submitted a research job for an idea that is already running for your account.
+
+**Fix:** Wait for the current job to finish (subscribe to `GET /research/{job_id}/events`), then start a new one if needed. Alternatively, use a different idea, or use an `Idempotency-Key` header on `POST /research` to safely replay the same request.
+
+### 429 — Too many requests
+
+You've exceeded the rate limit for an endpoint. Check the `Retry-After` response header for the number of seconds to wait before retrying.
+
+**Fix:** Slow down your request rate and respect the `Retry-After` value.
+
+<CodeGroup>
+
+```bash curl
+# Inspect the Retry-After header on a 429 response
+curl -i https://api.manticscore.com/research \
+  -X POST \
+  -H "Authorization: Bearer ms_sess_..." \
+  -H "Content-Type: application/json" \
+  -d '{"idea": "...", "project_id": null}'
+# HTTP/2 429
+# retry-after: 12
+```
+
+</CodeGroup>
+
+### 500 — `BRIDGE_INVARIANT_VIOLATED`
+
+`POST /ideas` returns this when the server could not link a project to the new card. Every card created through `POST /ideas` is guaranteed to have a non-null `project_id`, and this error is returned rather than shipping a card the client can't navigate to via `GET /projects/{id}`.
+
+The response body includes a structured `detail` object instead of a plain string:
+
+```json
+{
+  "detail": {
+    "code": "BRIDGE_INVARIANT_VIOLATED",
+    "message": "Could not create project for this idea. Please retry."
+  }
+}
+```
+
+**Fix:** This is typically transient. Retry the same `POST /ideas` request — the auto-bridge is idempotent per user on the semantic content of the idea, so a retry will not create duplicate projects. If it persists, capture the `X-Request-ID` header and contact support.
+
+### 502 — Bad gateway
+
+An external service your request depended on — GitHub, Composio, or another third-party integration — returned an error.
+
+**Fix:** This is typically transient. Wait a moment and retry the request. If it persists, check the `X-Request-ID` header and contact support.
+
+### 503 — Service unavailable
+
+A critical dependency is down. Common causes:
+
+- **JWKS not loaded** — the Clerk auth service isn't reachable. All auth requests will fail until it recovers.
+- **Embedding service down** — semantic search endpoints will return `503` until the embedding provider is reachable again.
+
+**Fix:** Retry after a few seconds. These states are typically self-resolving.
+
+## Streaming errors
+
+For endpoints that return NDJSON streams (`GET /research/{job_id}/events`, `GET /build-graphs/{graph_id}/events`, etc.), errors are delivered as a JSON line in the stream rather than as an HTTP error status:
+
+```json
+{"v": 1, "event": "error", "data": {"message": "string", "code": "string", "retryable": true}}
+```
+
+<ResponseField name="data.message" type="string" required>
+  Human-readable description of the error.
+</ResponseField>
+
+<ResponseField name="data.code" type="string" required>
+  Machine-readable error code for programmatic handling.
+</ResponseField>
+
+<ResponseField name="data.retryable" type="boolean" required>
+  If `true`, the operation is safe to retry — for example, a transient external service failure. If `false`, retrying without changing your request will produce the same error.
+</ResponseField>
+
+When you receive an `error` event in a stream, check `retryable`. If it's `true`, re-connect to the stream (using the `cursor` query parameter to resume from where you left off) after a short backoff. If it's `false`, surface the `message` to the user and investigate the root cause before retrying.
+
+<Warning>
+  A streaming `error` event is followed by a `done` event. The HTTP connection itself closes cleanly — you won't receive a non-200 status code for in-stream errors.
+</Warning>
+
+### Common streaming error codes
+
+The most frequent `code` values you'll encounter on streaming endpoints:
+
+| Code | Pipeline | Retryable | Meaning |
+|------|----------|-----------|---------|
+| `EMPTY_OUTPUT` | Research | `false` | The `analyze` stage produced zero incumbents, zero emerging players, and zero features **and the pipeline gathered no supporting evidence**. The submitted idea was unresearchable — typically a meta-description, gibberish, or too narrow. Prompt the user to submit a more specific product idea. |
+| `MODEL_EMPTY_DESPITE_EVIDENCE` | Research | `false` | The `analyze` stage produced zero incumbents, zero emerging players, and zero features **even though the pipeline collected supporting evidence** (and a strict-mode retry also returned empty). This indicates the model failed to extract structured competitors from real source material — distinct from a genuinely unresearchable input. Surface the `message` to the user and suggest they rephrase the idea as a specific product or feature. The `data.evidence_count` field reports how many sources were available. |
+| `EMPTY_INPUT` | Research | `false` | The submitted idea was rejected before the pipeline ran. Validate the idea body text client-side before retrying. |
+| `LLM_TIMEOUT` | Build graphs | `true` | LLM generation timed out. Reconnect after a short backoff. |
+| `VALIDATION_FAILED` | Forge | `false` | Generated code failed validation checks. The result will not be retried automatically. |
+
+<Note>
+  Research `error` events for `EMPTY_OUTPUT` and `MODEL_EMPTY_DESPITE_EVIDENCE` include an `evidence_count` field on `data` reporting how many sources the pipeline gathered. Use this to distinguish bad input (`evidence_count: 0`) from model-side extraction failures (`evidence_count > 0`).
+</Note>
+
+<Tip>
+  When `retryable` is `false`, the operation will not succeed by replaying the same input. Surface the `message` to the user and have them adjust their input before re-submitting.
+</Tip>

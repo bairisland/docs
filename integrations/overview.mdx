@@ -1,0 +1,167 @@
+---
+title: "Integrations overview: connect your tools to ManticScore"
+description: "Connect ManticScore to 18+ tools — GitHub, Linear, Jira, Slack, Notion, Gmail, and more — to ship research and build plans directly into your existing workflow."
+---
+
+ManticScore integrates with the tools you already use for code, tasks, and communication. Once you connect an integration, ManticScore auto-discovers your resources — repos, teams, channels, and databases — and sets smart defaults so exporting a build plan or research summary is a single action. All integrations are powered by Composio and managed from your profile.
+
+<CardGroup cols={3}>
+  <Card title="GitHub" icon="github" href="/integrations/github">
+    Connect repos, create PRs, and ship build plans as Forge runs.
+  </Card>
+  <Card title="Linear & Jira" icon="circle-check" href="/integrations/linear-jira">
+    Turn build nodes into tracked issues in your preferred task tracker.
+  </Card>
+  <Card title="Slack & Notion" icon="bell" href="/integrations/slack-notion">
+    Share research and build plans to Slack channels or Notion pages.
+  </Card>
+</CardGroup>
+
+## Available integrations
+
+ManticScore supports 18 integrations across three categories. Use `GET /profile/integrations` to see all of them along with their current connection status.
+
+<CodeGroup>
+
+```bash Request
+curl https://api.manticscore.com/profile/integrations \
+  -H "Authorization: Bearer <token>"
+```
+
+```json Response
+{
+  "integrations": [
+    {
+      "id": "github",
+      "name": "GitHub",
+      "category": "code",
+      "status": "connected",
+      "account_id": "abc123",
+      "can_refresh": false,
+      "defaults": { "repo": "acme/my-app", "branch_prefix": "mc/" },
+      "agent_capabilities": ["create_pr", "list_repos", "browse_contents"]
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "category": "tasks",
+      "status": "disconnected",
+      "account_id": null,
+      "can_refresh": false,
+      "defaults": {},
+      "agent_capabilities": []
+    }
+  ],
+  "connected_count": 3,
+  "total_available": 18
+}
+```
+
+</CodeGroup>
+
+### Categories
+
+| Category | Integrations |
+|---|---|
+| **Code** | GitHub |
+| **Tasks** | Linear, Jira |
+| **Messaging & docs** | Slack, Notion, Gmail |
+
+The `status` field for each integration is one of:
+
+- `connected` — active and ready to use
+- `expired` — connected but the OAuth token has expired; refresh it without re-authenticating
+- `disabled` — connected but manually disabled
+- `disconnected` — not yet connected
+
+## Connecting an integration
+
+To connect any integration, call `POST /profile/integrations/{toolkit}/connect`. The response includes a URL that you open in a browser to complete the OAuth flow. After you authorize, ManticScore redirects back to the app and starts auto-discovering your resources in the background.
+
+<Steps>
+  <Step title="Start the OAuth flow">
+    Call the connect endpoint for the toolkit you want to add.
+
+    ```bash
+    curl -X POST https://api.manticscore.com/profile/integrations/linear/connect \
+      -H "Authorization: Bearer <token>"
+    ```
+
+    ```json
+    {
+      "url": "https://composio.dev/oauth/linear/...",
+      "toolkit": "linear"
+    }
+    ```
+  </Step>
+  <Step title="Complete authorization in your browser">
+    Open the `url` from the response. Sign in to the tool and grant ManticScore access. You are redirected back to the app when complete.
+  </Step>
+  <Step title="Auto-discovery runs">
+    ManticScore automatically discovers your resources — Linear teams, Slack channels, GitHub repos, Notion pages — and saves them as smart defaults. You can also trigger this manually with `POST /integrations/{toolkit}/discover`.
+  </Step>
+</Steps>
+
+<Note>
+GitHub uses a separate native OAuth flow via `POST /auth/github/start` rather than the Composio path. See the [GitHub integration guide](/integrations/github) for details.
+</Note>
+
+## Disconnecting
+
+```bash
+curl -X POST https://api.manticscore.com/profile/integrations/linear/disconnect \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{ "success": true }
+```
+
+## Refreshing an expired connection
+
+When a connection expires, you can refresh it without going through the OAuth flow again — as long as `can_refresh` is `true` in the integration list. Use the `account_id` value (not the toolkit slug) to refresh.
+
+```bash
+curl -X POST https://api.manticscore.com/profile/integrations/abc123/refresh \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{ "refreshed": true }
+```
+
+If `refreshed` is `false`, the response includes an `error` field explaining why. In that case, disconnect and reconnect to get a fresh token.
+
+## Configuring defaults
+
+Each integration has a set of configurable defaults that ManticScore uses when exporting — for example, which Linear team to create issues in or which Slack channel to post to. You update these with `PATCH /profile/integrations/{toolkit}/defaults`. The body is a sparse merge: only the fields you include are changed.
+
+```bash
+curl -X PATCH https://api.manticscore.com/profile/integrations/slack/defaults \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"channel_id": "C1234", "channel_name": "product-updates"}'
+```
+
+```json
+{
+  "toolkit": "slack",
+  "defaults": {
+    "channel_id": "C1234",
+    "channel_name": "product-updates",
+    "format": "summary"
+  }
+}
+```
+
+<Tip>
+ManticScore sets initial defaults automatically after the OAuth flow completes. You only need to call this endpoint if you want to override a specific field or point ManticScore at a different resource.
+</Tip>
+
+## What happens after you connect
+
+Once connected, ManticScore integrations work in three ways:
+
+1. **One-tap ship** — Export a build plan or research to your tool with a single API call (`POST /build-graphs/{id}/ship` or `POST /research/{id}/share`). No extra configuration needed if defaults are set.
+2. **Node-level actions** — Create a ticket in Linear or Jira from a single build node (`POST /build-nodes/{id}/ticket`), or export a node to Notion (`POST /build-nodes/{id}/doc`).
+3. **Automations** — Define "when X happens, do Y" rules that run automatically. See [Automations](/integrations/automations) for the full reference.

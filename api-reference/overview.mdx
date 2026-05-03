@@ -1,0 +1,162 @@
+---
+title: "ManticScore API overview and base concepts"
+description: "Everything you need to start building on the ManticScore API: base URL, authentication modes, request headers, response formats, and health endpoints."
+---
+
+The ManticScore API gives you programmatic access to the full platform — market research pipelines, build graphs, competitive signals, AI chat, and more. All endpoints are served from a single base URL, speak JSON (or NDJSON for streaming), and follow predictable patterns for authentication, pagination, and error reporting. Whether you're building an integration, automating workflows, or shipping a client app, this reference covers the rules that apply everywhere.
+
+**Base URL:** `https://api.manticscore.com`
+
+The API currently exposes **128+ routes** across 29 resource families. All routers are mounted at the root — there is no global path prefix.
+
+## Authentication modes
+
+Every endpoint uses one of four authentication modes. You'll see these called out on each route.
+
+| Mode | Description |
+|------|-------------|
+| **Required** | Clerk JWT or session token in the `Authorization: Bearer` header |
+| **Stream** | Same as Required, but extends the session TTL on connect for long-lived NDJSON streams |
+| **Public** | No `Authorization` header needed |
+| **OAuth redirect** | Receives a `code`/`state` from GitHub or Composio — not called directly by your app |
+
+<Note>
+  Most routes use **Required** auth. Obtain a session token by exchanging your Clerk JWT at `POST /auth/session`. See [Authentication](/api-reference/authentication) for the full flow.
+</Note>
+
+## Global request headers
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for all protected endpoints. Send your session token (preferred) or Clerk JWT.
+
+  ```
+  Authorization: Bearer <session_token>
+  ```
+</ParamField>
+
+<ParamField header="Idempotency-Key" type="string">
+  Optional on `POST /research` and `POST /projects/research`. Providing a unique key prevents duplicate jobs when the same request is retried — the server replays the original response instead of starting a new pipeline.
+</ParamField>
+
+## Response headers
+
+Every response from the API includes an `X-Request-ID` header containing a 16-character hex string. Include this value when filing a bug report or opening a support request — it uniquely identifies the server-side trace for that call.
+
+## Response format
+
+Responses are `application/json` unless the endpoint is a streaming resource, in which case the content type is `application/x-ndjson`. Streaming endpoints use the NDJSON v1 protocol: each line is a complete JSON object with the shape `{"v": 1, "event": "<type>", "data": {...}}`.
+
+<Tip>
+  When consuming NDJSON streams, parse on the `event` field and ignore any event types you don't recognize. The protocol is forward-compatible — new event types may be added without a version bump.
+</Tip>
+
+## Health and status endpoints
+
+These endpoints are public — no `Authorization` header required.
+
+### GET /health
+
+Returns the current liveness of the API and its database dependency.
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/health
+```
+
+```python Python
+import httpx
+response = httpx.get("https://api.manticscore.com/health")
+print(response.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "status": "ok",
+  "database": "ok",
+  "deployment": {
+    "version": "1.4.2",
+    "git_sha": "a1b2c3d",
+    "deployed_at_utc": "2026-04-19T10:00:00Z"
+  }
+}
+```
+
+<ResponseField name="status" type="string" required>
+  Overall API health. Either `ok` or `degraded`.
+</ResponseField>
+
+<ResponseField name="database" type="string" required>
+  Database connectivity. Either `ok` or `unreachable`.
+</ResponseField>
+
+<ResponseField name="deployment" type="object">
+  <Expandable title="properties">
+    <ResponseField name="version" type="string">
+      Current release version string.
+    </ResponseField>
+    <ResponseField name="git_sha" type="string">
+      Short commit SHA of the deployed build.
+    </ResponseField>
+    <ResponseField name="deployed_at_utc" type="string">
+      ISO 8601 timestamp of the last deployment.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### GET /version
+
+Returns version and host metadata only — lighter than `/health` because it skips the database probe.
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/version
+```
+
+```python Python
+import httpx
+response = httpx.get("https://api.manticscore.com/version")
+print(response.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "version": "1.4.2",
+  "git_sha": "a1b2c3d",
+  "deployed_at_utc": "2026-04-19T10:00:00Z",
+  "hostname": "api-prod-1"
+}
+```
+
+### GET /status
+
+Returns the full route registry grouped by client, plus database and deployment state. Useful for verifying which endpoints are registered on the running instance.
+
+<CodeGroup>
+
+```bash curl
+curl -H "Accept: application/json" https://api.manticscore.com/status
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "api_status": "ok",
+  "database": "ok",
+  "route_count": 128,
+  "routes": [
+    { "method": "GET", "path": "/health", "auth": "none", "client": "infra" },
+    { "method": "POST", "path": "/research", "auth": "bearer", "client": "both" }
+  ]
+}
+```
+
+<Note>
+  By default, `GET /status` returns an HTML page. Pass `Accept: application/json` to get the machine-readable response shown above.
+</Note>

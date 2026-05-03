@@ -1,0 +1,407 @@
+---
+title: "Briefs API — generate, stream, export, and share briefs"
+description: "Create AI-generated market briefs, stream section progress, regenerate sections, diff revisions, export to PDF, publish as a shareable clip, or share via token."
+---
+
+Briefs transform completed research into a structured market analysis document — market map, incumbent analysis, emerging players, feature landscape, market gaps, positioning, and MVP angle. Sections are generated in parallel and streamed as they complete, so you can display partial content immediately rather than waiting for the full document. Each brief is revisioned, diffable, and exportable to PDF or as a shareable App Clip page.
+
+## Create a brief
+
+<ParamField body="project_id" type="string" required>
+  UUID of the project to create the brief for. The server uses the project's latest completed research to generate the brief.
+</ParamField>
+
+<ParamField body="research_id" type="string">
+  UUID of a specific research run to use. When omitted, the server picks the most recent completed research for the project.
+</ParamField>
+
+<ParamField body="template" type="string">
+  Optional template name to vary the brief structure or tone. Pass `null` for the default template.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/briefs \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"project_id": "9f4e2a1b-..."}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/briefs",
+    headers={"Authorization": "Bearer <token>"},
+    json={"project_id": "9f4e2a1b-..."},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 201 response
+{
+  "brief_id": "e3f8a1d2-...",
+  "status": "generating"
+}
+```
+
+<Warning>
+  Returns `404` if the specified `research_id` is not found or has not completed. Returns `422` if the project has no completed research at all.
+</Warning>
+
+Stream section progress immediately from `GET /briefs/{brief_id}/events`. You can also poll `GET /briefs/{brief_id}` — it returns whatever sections have been written so far, even during generation.
+
+<Note>
+  **Briefs can also be created automatically.** The first time a [Forge](/api-reference/forge) run on a project opens a pull request, the server bootstraps a brief for that project (using the latest completed research with `audience: "founder"`) if one does not already exist, then appends a `progress` section that summarizes the PR. Subsequent PRs upsert items into that same `progress` section keyed by `pr_number` and bump `brief.revision`. You will see these auto-created briefs in `GET /briefs` alongside ones you created explicitly.
+</Note>
+
+---
+
+## List briefs
+
+<ParamField query="limit" type="number" default="20">
+  Maximum number of briefs to return. Upper bound: 100.
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of items to skip for pagination.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/briefs?limit=20&offset=0" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+[
+  {
+    "id": "e3f8a1d2-...",
+    "project_id": "9f4e2a1b-...",
+    "research_id": "7c3d1e9a-...",
+    "title": "AI Expense Tracker Market Brief",
+    "status": "ready",
+    "revision": 1,
+    "quality_score": 75,
+    "share_token": "tok_xyz789",
+    "template": null,
+    "refresh_enabled": false,
+    "created_at": "2026-04-18T17:00:00Z",
+    "updated_at": "2026-04-18T17:30:00Z"
+  }
+]
+```
+
+<ResponseField name="revision" type="number" required>
+  Increments each time a section is regenerated. Use with the diff endpoint.
+</ResponseField>
+
+<ResponseField name="quality_score" type="number" required>
+  0–100 quality score computed from section completeness and source confidence.
+</ResponseField>
+
+<ResponseField name="share_token" type="string">
+  Token for the public share link. Present once the brief has been shared.
+</ResponseField>
+
+---
+
+## Get a brief
+
+Returns the full brief with all sections that have been written so far. During generation, sections complete progressively — poll this endpoint or stream events to track progress.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/briefs/e3f8a1d2-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "e3f8a1d2-...",
+  "project_id": "9f4e2a1b-...",
+  "research_id": "7c3d1e9a-...",
+  "title": "AI Expense Tracker Market Brief",
+  "status": "ready",
+  "revision": 1,
+  "quality_score": 75,
+  "share_token": "tok_xyz789",
+  "template": null,
+  "market_map": {},
+  "incumbents": [],
+  "emerging": [],
+  "features": [],
+  "market_gaps": [],
+  "positioning": {},
+  "mvp_angle": {},
+  "section_meta": {
+    "incumbents": {
+      "quality_score": 82,
+      "generated_at": "2026-04-18T17:05:00Z"
+    }
+  },
+  "sources": [
+    {
+      "url": "https://techcrunch.com/...",
+      "title": "The rise of AI-powered expense tools",
+      "snippet": "...",
+      "confidence": 0.91
+    }
+  ],
+  "created_at": "2026-04-18T17:00:00Z",
+  "updated_at": "2026-04-18T17:30:00Z"
+}
+```
+
+<ResponseField name="market_map" type="object">
+  Structured map of the competitive landscape.
+</ResponseField>
+
+<ResponseField name="incumbents" type="array">
+  Analysis of established competitors.
+</ResponseField>
+
+<ResponseField name="emerging" type="array">
+  Analysis of newer entrants and challengers.
+</ResponseField>
+
+<ResponseField name="features" type="array">
+  Feature comparison across competitors.
+</ResponseField>
+
+<ResponseField name="market_gaps" type="array">
+  Identified opportunities not well-served by existing products.
+</ResponseField>
+
+<ResponseField name="positioning" type="object">
+  Recommended positioning for your product.
+</ResponseField>
+
+<ResponseField name="mvp_angle" type="object">
+  Suggested MVP scope and angle based on the market gaps.
+</ResponseField>
+
+<ResponseField name="progress" type="object">
+  Optional auto-maintained section that tracks Forge pull requests opened against this project. Has shape `{"title": "Progress", "items": [{"pr_number": 42, "pr_url": "...", "summary": "...", "appended_at": "..."}]}`. Items are upserted on `pr_number`, so re-emitting the same PR is idempotent. Absent on briefs that have never had a PR auto-appended.
+</ResponseField>
+
+<ResponseField name="section_meta" type="object">
+  Per-section metadata keyed by section name. Each value contains a `quality_score` and `generated_at` timestamp.
+</ResponseField>
+
+<ResponseField name="sources" type="object[]">
+  Web sources consulted during generation. Each source includes a `url`, `title`, `snippet`, and a `confidence` score.
+</ResponseField>
+
+---
+
+## Stream brief generation events
+
+Subscribe to the live NDJSON stream as the brief's sections are written. Reconnect at any sequence number using the cursor.
+
+<ParamField query="cursor" type="number" default="0">
+  Resume from this event sequence number.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -N "https://api.manticscore.com/briefs/e3f8a1d2-.../events?cursor=0" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+with httpx.stream(
+    "GET",
+    "https://api.manticscore.com/briefs/e3f8a1d2-.../events",
+    headers={"Authorization": "Bearer <token>"},
+    params={"cursor": 0},
+) as resp:
+    for line in resp.iter_lines():
+        if line:
+            print(line)
+```
+
+</CodeGroup>
+
+Each line is a JSON object with shape `{"v": 1, "event": "<type>", "data": {...}}`. The event types are:
+
+| Event | Description |
+|-------|-------------|
+| `section_progress` | A section has been written. Data contains the section name and content. |
+| `brief_ready` | All sections are complete. The brief is fully generated. |
+| `error` | A fatal error occurred. |
+| `done` | Stream is closed. Always the last event. |
+
+---
+
+## Regenerate a section
+
+Re-runs generation for a single section of the brief. Increments the brief's `revision` counter. Use the diff endpoint afterwards to compare what changed.
+
+<ParamField path="section_type" type="string" required>
+  The section to regenerate. One of: `market_map`, `incumbents`, `emerging`, `features`, `market_gaps`, `positioning`, `mvp_angle`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/briefs/e3f8a1d2-.../sections/incumbents/regenerate" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "status": "regenerating",
+  "section_type": "incumbents",
+  "revision": 2
+}
+```
+
+---
+
+## Diff brief revisions
+
+Compare the current version of the brief against an earlier revision to see which sections changed.
+
+<ParamField query="from_revision" type="number">
+  The earlier revision to compare from. Omit to compare against the immediately previous revision.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/briefs/e3f8a1d2-.../diff?from_revision=1" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "from_revision": 1,
+  "to_revision": 2,
+  "changes": 3,
+  "diff": [
+    {
+      "section_type": "incumbents",
+      "change": "modified"
+    }
+  ]
+}
+```
+
+---
+
+## Build a graph from a brief
+
+Generates a build graph using the features in the brief. Returns immediately — the graph is built in the background.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/briefs/e3f8a1d2-.../build" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 201 response
+{
+  "graph_id": "5b2c8f3d-...",
+  "features_selected": 5
+}
+```
+
+Returns `422` if the brief has no features section yet.
+
+---
+
+## Export to PDF
+
+Downloads the brief as a binary PDF file rendered by WeasyPrint. If rendering fails, the server falls back to a plain-text export.
+
+<ParamField query="format" type="string" default="pdf">
+  Export format. Currently only `pdf` is supported.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/briefs/e3f8a1d2-.../export?format=pdf" \
+  -H "Authorization: Bearer <token>" \
+  --output brief.pdf
+```
+
+</CodeGroup>
+
+Returns binary PDF content with `Content-Type: application/pdf`. Returns `422` for unsupported format values.
+
+---
+
+## Publish as a shareable clip
+
+Publishes the brief as a public App Clip page at `manticscore.com/clip/brief-...`.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/briefs/e3f8a1d2-.../publish-clip" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "url": "https://manticscore.com/clip/brief-e3f8a1d2",
+  "slug": "brief-e3f8a1d2"
+}
+```
+
+Returns `502` if the CMS publish step fails.
+
+---
+
+## Read a shared brief (public)
+
+Anyone with the share token can read the brief without authentication. Content-negotiated: returns HTML by default (with Open Graph meta tags), or JSON when you pass `Accept: application/json`.
+
+Rate limit: **30 requests per minute**.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/share/tok_xyz789" \
+  -H "Accept: application/json"
+```
+
+</CodeGroup>
+
+---
+
+## Delete a brief
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE "https://api.manticscore.com/briefs/e3f8a1d2-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+Returns `204 No Content` on success.

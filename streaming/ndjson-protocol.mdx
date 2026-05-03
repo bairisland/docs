@@ -1,0 +1,194 @@
+---
+title: "NDJSON streaming protocol for long-running jobs"
+description: "How ManticScore streams real-time progress events over HTTP using newline-delimited JSON, with cursor-based replay and forward-compatible event parsing."
+---
+
+ManticScore uses newline-delimited JSON (NDJSON) to stream progress events for all long-running operations — market research, feature deep research, build graphs, Forge coding runs, briefs, and chat. Instead of polling for results, your client opens a persistent HTTP connection and receives events line by line as work progresses.
+
+## Protocol basics
+
+Every streaming endpoint returns:
+
+```
+Content-Type: application/x-ndjson
+Cache-Control: no-cache
+X-Accel-Buffering: no
+X-Request-ID: <trace id>
+```
+
+Each line in the response body is a complete JSON object with this envelope:
+
+```json
+{"v": 1, "event": "<type>", "data": {...}}
+```
+
+The `v` field is the protocol version. The `event` field identifies the event type. The `data` object contains the payload for that event type.
+
+<Note>
+  Parse on the `event` field and ignore unknown event types. New event types may be added to any stream, and forward-compatible clients should skip them silently.
+</Note>
+
+## Cursor-based replay
+
+Every streaming endpoint accepts a `cursor` query parameter (default `0`). Pass the `seq` number of the last event you received to resume a stream without re-reading events you have already processed.
+
+```
+GET /research/{job_id}/events?cursor=12
+```
+
+The server replays all events with a sequence number greater than `cursor`, then continues streaming live events. This means you can reconnect after a network drop without losing any events.
+
+<Tip>
+  Store the `seq` field from each incoming event. On reconnect, pass the highest `seq` you received as `cursor`.
+</Tip>
+
+## Common event types
+
+These events appear across all streams:
+
+| Event | When it fires | Key data fields |
+|-------|---------------|-----------------|
+| `stream_start` | First event on every stream | `request_id`, entity ID |
+| `stage` | A pipeline stage starts, completes, or fails | `name`, `status`, optional timing and counts |
+| `progress` | Human-readable status update during a stage | `stage`, `message` |
+| `result` | Final output when the job completes | full artifact payload |
+| `error` | A non-recoverable error occurred | `message`, `code`, `retryable` |
+| `done` | Stream is complete — close the connection | `{}` |
+
+An `error` event with `"retryable": true` means the job can be restarted with the same inputs.
+
+## Research events
+
+```json
+{"v":1, "event":"stream_start", "data":{"request_id":"req_abc", "job_id":"uuid"}}
+{"v":1, "event":"stage",        "data":{"name":"interpret", "status":"started"}}
+{"v":1, "event":"progress",     "data":{"stage":"search", "message":"Scanning 24 sources"}}
+{"v":1, "event":"stage",        "data":{"name":"search", "status":"completed", "sources":24, "duration_ms":3200}}
+{"v":1, "event":"stage",        "data":{"name":"analyze", "status":"started"}}
+{"v":1, "event":"result",       "data":{"job_id":"uuid", ...full research artifact}}
+{"v":1, "event":"done",         "data":{}}
+```
+
+Pipeline stages: `interpret` → `search` → `judge` → `analyze` → `synthesize` → `persist`
+
+The `judge` stage is non-blocking. If it fails, the pipeline continues to `analyze` regardless.
+
+## Build graph events
+
+```json
+{"v":1, "event":"graph_created", "data":{"graph_id":"uuid", "project_id":"uuid"}}
+{"v":1, "event":"node_created",  "data":{"id":"uuid", "node_key":"auth-layer", "depth":1, "name":"Auth layer", "description":"...", "risk":"green", "node_status":"leaf"}}
+{"v":1, "event":"graph_ready",   "data":{"graph_id":"uuid", "root_count":5, "duration_ms":8400}}
+{"v":1, "event":"done",          "data":{}}
+```
+
+You receive one `node_created` event per node. Assemble the tree client-side using the `parent_id` field included in full events.
+
+## Forge events
+
+```json
+{"v":1, "event":"stream_start",    "data":{"request_id":"req_abc", "job_id":"uuid"}}
+{"v":1, "event":"plan",            "data":{...plan data}}
+{"v":1, "event":"diff",            "data":{...code diff}}
+{"v":1, "event":"status_change",   "data":{"status":"awaiting_approval"}}
+{"v":1, "event":"tool_call_failed","data":{"tool":"github.create_branch", "error":"403 Forbidden"}}
+{"v":1, "event":"done",            "data":{}}
+```
+
+## Chat events
+
+```json
+{"v":1, "event":"agent_turn",          "data":{"turn":1, "stop_reason":"tool_use"}}
+{"v":1, "event":"tool_call",           "data":{"tool_name":"run_research", "args":{}}}
+{"v":1, "event":"tool_progress",       "data":{"turn":1, "tool":"run_research", "status":"in_progress"}}
+{"v":1, "event":"message_delta",       "data":{"text":"Here's what I found: "}}
+{"v":1, "event":"conversation_summary","data":{"summary":"...", "tools_used":["run_research"], "session_id":"uuid"}}
+{"v":1, "event":"done",                "data":{}}
+```
+
+Append each `message_delta.text` value to build the full assistant message.
+
+## Code examples
+
+<CodeGroup>
+
+```bash curl
+# Research stream — disable output buffering so events arrive immediately
+curl --no-buffer \
+  -H "Authorization: Bearer $TOKEN" \
+  "https://api.manticscore.com/research/$JOB_ID/events?cursor=0"
+
+# Resume from event 12
+curl --no-buffer \
+  -H "Authorization: Bearer $TOKEN" \
+  "https://api.manticscore.com/research/$JOB_ID/events?cursor=12"
+```
+
+```python Python (httpx)
+import httpx
+import json
+
+def stream_research(job_id: str, token: str, cursor: int = 0):
+    url = f"https://api.manticscore.com/research/{job_id}/events"
+    headers = {"Authorization": f"Bearer {token}"}
+    last_seq = cursor
+
+    with httpx.Client() as client:
+        with client.stream("GET", url, params={"cursor": cursor}, headers=headers) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                seq = event.get("data", {}).get("seq")
+                if seq is not None:
+                    last_seq = seq
+                print(f"[{event['event']}] {event['data']}")
+                if event["event"] == "done":
+                    break
+
+    return last_seq
+```
+
+```javascript JavaScript (fetch)
+async function streamResearch(jobId, token, cursor = 0) {
+  const url = `https://api.manticscore.com/research/${jobId}/events?cursor=${cursor}`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let lastSeq = cursor;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop(); // keep partial last line
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+      const seq = event.data?.seq;
+      if (seq != null) lastSeq = seq;
+
+      console.log(`[${event.event}]`, event.data);
+      if (event.event === "done") return lastSeq;
+    }
+  }
+
+  return lastSeq;
+}
+```
+
+</CodeGroup>
+
+## Tracing
+
+Every response includes an `X-Request-ID` header. Include this value when reporting issues — it maps directly to server-side logs.

@@ -1,0 +1,548 @@
+---
+title: "Signals API — competitive intelligence and monitoring"
+description: "Track competitor signals, manage your company watchlist, configure scheduled web crawls, and score your competitive position with ManticScore's AI intelligence pipeline."
+---
+
+The Signals API powers ManticScore's competitive intelligence layer. You add companies to a watchlist, configure web monitors that crawl their sites on a schedule, and the platform surfaces AI-enriched signals — funding announcements, product launches, hiring trends, and pricing changes — ranked by relevance. The score endpoint gives you a single number that reflects how actively your environment is being monitored.
+
+## List signals
+
+Returns signals across all monitored companies. Filter by company or signal type using query parameters.
+
+<ParamField query="limit" type="number" default="50">
+  Maximum signals to return. Upper bound: 200.
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of signals to skip for pagination.
+</ParamField>
+
+<ParamField query="company_id" type="string">
+  UUID of a specific company. Omit to return signals for all monitored companies.
+</ParamField>
+
+<ParamField query="signal_type" type="string">
+  Filter by signal type string (e.g. `funding`, `product_launch`, `hiring`).
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals?limit=50&company_id=9f4e2a1b-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/signals",
+    headers={"Authorization": "Bearer <token>"},
+    params={"limit": 50, "company_id": "9f4e2a1b-..."},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "signals": [
+    {
+      "id": "a1b2c3d4-...",
+      "company_id": "9f4e2a1b-...",
+      "signal_type": "funding",
+      "title": "Series B announced",
+      "summary": "Acme Corp raises $40M Series B led by Sequoia.",
+      "ai_insight": "Signals aggressive expansion into enterprise segment.",
+      "relevance_score": 0.85,
+      "signal_tag": "threat",
+      "source_url": "https://techcrunch.com/...",
+      "cluster_id": null,
+      "detected_at": "2026-04-18T09:00:00Z",
+      "created_at": "2026-04-18T09:05:00Z",
+      "company_name": "Acme Corp",
+      "company_domain": "acmecorp.com",
+      "company_logo_url": "https://logo.clearbit.com/acmecorp.com"
+    }
+  ],
+  "total": 42
+}
+```
+
+<ResponseField name="signals" type="object[]" required>
+  <Expandable title="signal properties">
+    <ResponseField name="id" type="string">UUID of the signal.</ResponseField>
+    <ResponseField name="company_id" type="string">UUID of the company that generated the signal.</ResponseField>
+    <ResponseField name="signal_type" type="string">Machine-readable signal category (e.g. `funding`, `hiring`, `product_launch`).</ResponseField>
+    <ResponseField name="title" type="string">Short headline for the signal.</ResponseField>
+    <ResponseField name="summary" type="string">One-paragraph summary of the source content.</ResponseField>
+    <ResponseField name="ai_insight" type="string">ManticScore's strategic interpretation of what this signal means for your product.</ResponseField>
+    <ResponseField name="relevance_score" type="number">AI-assigned relevance score between 0 and 1.</ResponseField>
+    <ResponseField name="signal_tag" type="string">High-level classification: `threat`, `opportunity`, or `neutral`.</ResponseField>
+    <ResponseField name="source_url" type="string">URL of the original source page.</ResponseField>
+    <ResponseField name="cluster_id" type="string">Groups related signals together. `null` if this signal stands alone.</ResponseField>
+    <ResponseField name="detected_at" type="string">ISO 8601 timestamp when the signal was first detected.</ResponseField>
+    <ResponseField name="company_name" type="string">Display name of the monitored company.</ResponseField>
+    <ResponseField name="company_domain" type="string">Domain of the monitored company, or `null` if unknown.</ResponseField>
+    <ResponseField name="company_logo_url" type="string">Logo URL sourced from Clearbit, or `null` if unavailable.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="total" type="number" required>
+  Total number of signals matching the query (before pagination).
+</ResponseField>
+
+---
+
+## Companies
+
+### List companies
+
+Returns all companies in your watchlist with their full enriched profiles.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/companies" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "companies": [
+    {
+      "id": "9f4e2a1b-...",
+      "name": "Acme Corp",
+      "domain": "acmecorp.com",
+      "relationship": "watchlist",
+      "sector": "fintech",
+      "description": "B2B expense management platform."
+    }
+  ]
+}
+```
+
+---
+
+### Discover companies
+
+Search for companies to add to your watchlist. Powered by Exa's web search index.
+
+<ParamField query="q" type="string" required>
+  Search query. Between 2 and 200 characters.
+</ParamField>
+
+<ParamField query="limit" type="number" default="10">
+  Maximum results to return. Upper bound: 20.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/companies/discover?q=fintech+expense&limit=10" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "companies": [
+    {
+      "name": "Expensify",
+      "domain": "expensify.com",
+      "description": "Expense management and receipt scanning platform.",
+      "already_added": false
+    }
+  ],
+  "query": "fintech expense"
+}
+```
+
+<Warning>
+  Returns `503` if the Exa search integration is not configured on this deployment.
+</Warning>
+
+---
+
+### Add a company
+
+Creates a company entry and enqueues Exa enrichment. If you supply a `domain`, a web monitor is created automatically.
+
+<ParamField body="name" type="string" required>
+  Display name for the company.
+</ParamField>
+
+<ParamField body="domain" type="string">
+  Company domain (e.g. `acmecorp.com`). Providing a domain triggers enrichment and auto-creates a web monitor.
+</ParamField>
+
+<ParamField body="relationship" type="string" default="watchlist">
+  How this company relates to your work. Currently only `watchlist` is supported.
+</ParamField>
+
+<ParamField body="sector" type="string">
+  Industry sector label (e.g. `fintech`, `devtools`).
+</ParamField>
+
+<ParamField body="description" type="string">
+  Free-text description of the company.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/signals/companies \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Acme Corp", "domain": "acmecorp.com", "relationship": "watchlist", "sector": "fintech"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/signals/companies",
+    headers={"Authorization": "Bearer <token>"},
+    json={"name": "Acme Corp", "domain": "acmecorp.com", "sector": "fintech"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "company": {
+    "id": "9f4e2a1b-...",
+    "name": "Acme Corp",
+    "domain": "acmecorp.com",
+    "relationship": "watchlist",
+    "sector": "fintech"
+  }
+}
+```
+
+---
+
+### Get a company
+
+Returns the full company profile plus a 30-day signal summary.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/companies/9f4e2a1b-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "9f4e2a1b-...",
+  "name": "Acme Corp",
+  "domain": "acmecorp.com",
+  "sector": "fintech",
+  "signal_summary": {
+    "total_30d": 10,
+    "threats": 3,
+    "opportunities": 5,
+    "recent_7d": 4
+  }
+}
+```
+
+<ResponseField name="signal_summary" type="object">
+  <Expandable title="properties">
+    <ResponseField name="total_30d" type="number">Total signals detected in the last 30 days.</ResponseField>
+    <ResponseField name="threats" type="number">Signals tagged as threats.</ResponseField>
+    <ResponseField name="opportunities" type="number">Signals tagged as opportunities.</ResponseField>
+    <ResponseField name="recent_7d" type="number">Signals detected in the last 7 days.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Update a company
+
+Accepts any subset of fields. Changing the `domain` triggers re-enrichment and creates a new monitor automatically.
+
+<ParamField body="name" type="string">Updated display name.</ParamField>
+<ParamField body="domain" type="string">New domain. Changing this re-enriches the company and auto-creates a monitor.</ParamField>
+<ParamField body="relationship" type="string">Relationship type.</ParamField>
+<ParamField body="sector" type="string">Industry sector.</ParamField>
+<ParamField body="description" type="string">Updated description.</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X PATCH "https://api.manticscore.com/signals/companies/9f4e2a1b-..." \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"sector": "payments"}'
+```
+
+</CodeGroup>
+
+Returns the full updated company row on `200`.
+
+---
+
+### Enrich a company
+
+Queues an Exa enrichment job to refresh the company's profile data.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/signals/companies/9f4e2a1b-.../enrich" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{"queued": true, "company_id": "9f4e2a1b-..."}
+```
+
+---
+
+### Delete a company
+
+<CodeGroup>
+
+```bash curl
+curl -X DELETE "https://api.manticscore.com/signals/companies/9f4e2a1b-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{"deleted": true}
+```
+
+---
+
+### List signals for a company
+
+<ParamField query="limit" type="number" default="50">Maximum signals to return. Upper bound: 200.</ParamField>
+<ParamField query="signal_type" type="string">Filter to a specific signal type.</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/companies/9f4e2a1b-.../signals?limit=50" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "signals": [],
+  "total": 0,
+  "company_id": "9f4e2a1b-..."
+}
+```
+
+---
+
+### Get company highlights
+
+Returns a summarized view of recent signal activity, agent metrics, and the last crawl timestamp — useful for rendering a company card.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/companies/9f4e2a1b-.../highlights" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "company_id": "9f4e2a1b-...",
+  "company_name": "Acme Corp",
+  "agent_metrics": {},
+  "signal_summary": {"total_30d": 10, "threats": 3, "opportunities": 5, "recent_7d": 4},
+  "last_crawled_at": "2026-04-18T06:00:00Z"
+}
+```
+
+---
+
+### Get company snapshots
+
+Returns point-in-time data snapshots captured during past enrichment runs.
+
+<ParamField query="limit" type="number" default="20">Maximum snapshots to return. Upper bound: 100.</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/companies/9f4e2a1b-.../snapshots?limit=20" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "snapshots": [
+    {
+      "id": "c4d5e6f7-...",
+      "data": {},
+      "created_at": "2026-04-18T06:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## Monitors
+
+Monitors define which URLs to crawl and how often. When you add a company with a domain, ManticScore creates a monitor automatically. Use these endpoints to view and control your monitors directly.
+
+### List monitors
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/monitors" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "monitors": [
+    {
+      "id": "d1e2f3a4-...",
+      "company_id": "9f4e2a1b-...",
+      "crawl_frequency": "daily",
+      "is_active": true,
+      "last_crawl_at": "2026-04-18T06:00:00Z",
+      "last_crawl_status": "success",
+      "crawl_count": 12,
+      "created_at": "2026-04-10T10:00:00Z"
+    }
+  ]
+}
+```
+
+<ResponseField name="monitors" type="object[]">
+  <Expandable title="monitor properties">
+    <ResponseField name="id" type="string">Monitor UUID.</ResponseField>
+    <ResponseField name="company_id" type="string">UUID of the company being monitored.</ResponseField>
+    <ResponseField name="crawl_frequency" type="string">`daily` or `weekly`.</ResponseField>
+    <ResponseField name="is_active" type="boolean">Whether the monitor is currently scheduled.</ResponseField>
+    <ResponseField name="last_crawl_at" type="string">ISO 8601 timestamp of the most recent crawl, or `null` if it has never run.</ResponseField>
+    <ResponseField name="crawl_count" type="number">Total number of crawls completed.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### Create a monitor
+
+<ParamField body="company_id" type="string" required>
+  UUID of the company to monitor.
+</ParamField>
+
+<ParamField body="crawl_urls" type="string[]" required>
+  List of URLs to crawl during each run (e.g. homepage, blog, pricing page).
+</ParamField>
+
+<ParamField body="crawl_frequency" type="string" default="daily">
+  How often to run the crawl. Either `daily` or `weekly`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/signals/monitors \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"company_id": "9f4e2a1b-...", "crawl_urls": ["https://acmecorp.com", "https://acmecorp.com/blog"], "crawl_frequency": "daily"}'
+```
+
+</CodeGroup>
+
+```json 201 response
+{
+  "monitor": {
+    "id": "d1e2f3a4-...",
+    "company_id": "9f4e2a1b-...",
+    "crawl_frequency": "daily",
+    "is_active": true,
+    "crawl_count": 0
+  }
+}
+```
+
+---
+
+### Trigger an immediate crawl
+
+Runs a crawl right now, outside the regular schedule. The job is enqueued asynchronously.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/signals/monitors/d1e2f3a4-.../run" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{"queued": true, "monitor_id": "d1e2f3a4-..."}
+```
+
+---
+
+## Competitive score
+
+Returns a single score that summarizes how active your competitive monitoring is.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/signals/score" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "score": 75,
+  "status": "active",
+  "signal_count": 42,
+  "recent_count": 12
+}
+```
+
+<ResponseField name="score" type="number" required>
+  Competitive position score from 0 to 100.
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  `gathering` while monitors are still building signal history; `active` once you have sufficient coverage.
+</ResponseField>
+
+<ResponseField name="signal_count" type="number" required>
+  Total signals collected across all monitored companies.
+</ResponseField>
+
+<ResponseField name="recent_count" type="number" required>
+  Signals detected in the last 7 days.
+</ResponseField>

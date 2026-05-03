@@ -1,0 +1,257 @@
+---
+title: "GitHub integration: connect repos and automate PRs"
+description: "Connect GitHub to ManticScore to link repos to Forge, open PRs from build nodes, and ship entire build plans as automated code changes with one request."
+---
+
+The GitHub integration is the backbone of ManticScore's code automation. Once connected, you can link any repository to a Forge run, push code from a build node directly to a pull request, browse your repos and branches, and create new repositories — all through your connected GitHub account. ManticScore uses a native PKCE OAuth flow for GitHub, separate from the Composio path used by other integrations.
+
+## Connecting GitHub
+
+<Steps>
+  <Step title="Start the OAuth flow">
+    Call `POST /auth/github/start` to get an authorization URL. The URL expires in 10 minutes.
+
+    ```bash
+    curl -X POST https://api.manticscore.com/auth/github/start \
+      -H "Authorization: Bearer <token>"
+    ```
+
+    ```json
+    {
+      "auth_url": "https://github.com/login/oauth/authorize?client_id=...&state=...&code_challenge=...",
+      "expires_in": 600
+    }
+    ```
+  </Step>
+  <Step title="Open the URL in a browser">
+    Navigate to `auth_url`. Sign in to GitHub and authorize the ManticScore app. GitHub redirects back to the app with the connection confirmed.
+  </Step>
+  <Step title="Verify the connection">
+    Check your connection status at any time with `GET /auth/github/status`.
+
+    ```bash
+    curl https://api.manticscore.com/auth/github/status \
+      -H "Authorization: Bearer <token>"
+    ```
+
+    ```json
+    {
+      "connected": true,
+      "github_login": "octocat",
+      "github_name": "Mona Lisa",
+      "avatar_url": "https://avatars.githubusercontent.com/u/583231"
+    }
+    ```
+  </Step>
+</Steps>
+
+To disconnect, call `POST /auth/github/disconnect`. This revokes the token at GitHub as well.
+
+```bash
+curl -X POST https://api.manticscore.com/auth/github/disconnect \
+  -H "Authorization: Bearer <token>"
+```
+
+## Configuring defaults
+
+After connecting, set a default repository and branch configuration so ManticScore knows where to ship code without requiring these values on every call.
+
+```bash
+curl -X PATCH https://api.manticscore.com/profile/integrations/github/defaults \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "acme/my-app",
+    "default_branch": "main",
+    "branch_prefix": "mc/",
+    "pr_reviewers": ["alice", "bob"]
+  }'
+```
+
+```json
+{
+  "toolkit": "github",
+  "defaults": {
+    "repo": "acme/my-app",
+    "default_branch": "main",
+    "branch_prefix": "mc/",
+    "pr_reviewers": ["alice", "bob"]
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `repo` | Default repository in `owner/name` format |
+| `default_branch` | Base branch for pull requests (default: `main`) |
+| `branch_prefix` | Prefix applied to all ManticScore-created branches (default: `mc/`) |
+| `pr_reviewers` | GitHub usernames to request as reviewers on every PR |
+
+## Browsing your repositories
+
+All `/github/*` endpoints proxy through your connected GitHub account via Composio.
+
+### List repositories
+
+```bash
+curl "https://api.manticscore.com/github/repos?per_page=100" \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+[
+  {
+    "name": "my-app",
+    "full_name": "acme/my-app",
+    "default_branch": "main",
+    "private": true,
+    "html_url": "https://github.com/acme/my-app"
+  }
+]
+```
+
+### List branches
+
+```bash
+curl https://api.manticscore.com/github/repos/acme/my-app/branches \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+[
+  { "name": "main", "sha": "a1b2c3d4" },
+  { "name": "mc/auth-feature", "sha": "e5f6a7b8" }
+]
+```
+
+### List open pull requests
+
+```bash
+curl "https://api.manticscore.com/github/repos/acme/my-app/pulls?state=open" \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+[
+  {
+    "number": 42,
+    "title": "Add user authentication",
+    "state": "open",
+    "html_url": "https://github.com/acme/my-app/pull/42"
+  }
+]
+```
+
+## Creating repositories
+
+```bash
+curl -X POST https://api.manticscore.com/github/repos \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "new-project",
+    "description": "Created from ManticScore",
+    "private": true,
+    "auto_init": true
+  }'
+```
+
+```json
+{
+  "name": "new-project",
+  "full_name": "acme/new-project",
+  "html_url": "https://github.com/acme/new-project"
+}
+```
+
+## Creating pull requests
+
+### Push files and open a PR in one call
+
+The `push-and-pr` endpoint atomically creates a branch, commits your files, and opens a pull request — all in a single request.
+
+```bash
+curl -X POST https://api.manticscore.com/github/repos/acme/my-app/push-and-pr \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Add rate limiting middleware",
+    "body": "Implements token bucket rate limiting on all public endpoints.",
+    "branch_name": "mc/rate-limiting",
+    "base_branch": "main",
+    "commit_message": "feat: add rate limiting middleware",
+    "files": [
+      {
+        "path": "src/middleware/rate_limit.py",
+        "content": "# rate limiting implementation"
+      }
+    ]
+  }'
+```
+
+```json
+{
+  "branch": "mc/rate-limiting",
+  "commit_sha": "a1b2c3d4e5f6",
+  "pr_number": 43,
+  "pr_url": "https://github.com/acme/my-app/pull/43"
+}
+```
+
+## Shipping a build plan to GitHub
+
+The most powerful GitHub action is shipping an entire build plan as a Forge run. ManticScore takes your build graph, generates code for the selected tasks, and opens pull requests autonomously.
+
+```bash
+curl -X POST https://api.manticscore.com/build-graphs/graph-uuid/ship \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "github",
+    "repo": "acme/my-app"
+  }'
+```
+
+```json
+{
+  "target": "github",
+  "run_id": "forge-run-uuid",
+  "repo": "acme/my-app",
+  "status": "queued"
+}
+```
+
+<Note>
+Shipping to GitHub kicks off a Forge run. Track progress with `GET /forge/runs/{run_id}/events`. See the [Forge documentation](/features/forge) for the full run lifecycle.
+</Note>
+
+### Implementing a single build node
+
+To implement one specific build node rather than a whole build plan:
+
+```bash
+curl -X POST https://api.manticscore.com/build-nodes/node-uuid/implement \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "acme/my-app",
+    "branch": "mc/auth-feature",
+    "notes": "Use bcrypt for password hashing",
+    "mode": "create_pr"
+  }'
+```
+
+```json
+{
+  "node_id": "node-uuid",
+  "run_id": "forge-run-uuid",
+  "task_id": "task-uuid",
+  "repo": "acme/my-app",
+  "mode": "create_pr",
+  "status": "queued"
+}
+```
+
+<Warning>
+ManticScore requires push access to the target repository. If you receive a `403` error, verify that your connected GitHub account has write permissions on the repo.
+</Warning>

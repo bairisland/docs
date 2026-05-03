@@ -1,0 +1,245 @@
+---
+title: "WebSocket multiplexed streaming for multiple channels"
+description: "Subscribe to multiple live channels over one connection — research, build graphs, Forge, chat, and signals — with cursor-based replay when you reconnect."
+---
+
+The ManticScore WebSocket endpoint lets you subscribe to multiple entity channels over a single connection. Rather than opening a separate HTTP streaming request for each job, you connect once and subscribe to any mix of research runs, build graphs, Forge executions, chat sessions, and more.
+
+## Connecting
+
+```
+GET wss://api.manticscore.com/ws?token=<session_token>
+```
+
+Pass your session token as a query parameter. You can also pass a Clerk JWT — the server auto-mints a session token for the lifetime of the connection.
+
+<Warning>
+  ManticScore allows one WebSocket connection per user. Opening a new connection evicts the previous one with close code `4003`. Make sure your client handles reconnection gracefully rather than opening multiple connections.
+</Warning>
+
+After a successful upgrade, the server immediately sends a `connected` frame:
+
+```json
+{"v":1, "event":"connected", "data":{"user_id":"usr_abc", "server_time":"2026-04-23T12:00:00Z"}}
+```
+
+## Catchup frame
+
+If you have any in-flight or recently completed work, the server sends a `catchup` frame right after `connected`. This lets you know what to subscribe to without polling the REST API first.
+
+```json
+{
+  "v": 1,
+  "event": "catchup",
+  "data": {
+    "in_flight": [
+      {
+        "entity_id": "uuid",
+        "channel": "research",
+        "status": "running",
+        "stage": "analyze",
+        "last_event_seq": 8,
+        "project_id": "uuid"
+      }
+    ],
+    "completed": [
+      {
+        "entity_id": "uuid",
+        "channel": "build",
+        "project_id": "uuid",
+        "title": "Auth layer"
+      }
+    ]
+  }
+}
+```
+
+Use `in_flight[].last_event_seq` as your `cursor` when subscribing, so you don't re-receive events you already have.
+
+## Client messages
+
+Send JSON text frames to control your subscriptions:
+
+<AccordionGroup>
+  <Accordion title="subscribe">
+    Subscribe to a channel for a specific entity. The server replays events after `cursor`, sends a `subscribed` confirmation, then streams live events.
+
+    ```json
+    {"action": "subscribe", "entity_id": "<uuid>", "channel": "research", "cursor": 0}
+    ```
+
+    Pass the `seq` of the last event you received as `cursor` to resume without gaps.
+  </Accordion>
+  <Accordion title="unsubscribe">
+    Stop receiving events for an entity. The server auto-unsubscribes when it forwards a `done` event, but you can also unsubscribe manually.
+
+    ```json
+    {"action": "unsubscribe", "entity_id": "<uuid>"}
+    ```
+  </Accordion>
+  <Accordion title="ping">
+    Send a client-side keepalive. The server replies with a `pong` frame.
+
+    ```json
+    {"action": "ping"}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Server messages
+
+| Event | When | Key data |
+|-------|------|----------|
+| `connected` | On connect | `user_id`, `server_time` |
+| `catchup` | After `connected`, when work is in flight | `in_flight`, `completed` arrays |
+| `subscribed` | After a successful subscribe | `entity_id`, `channel`, `replayed` count |
+| `ping` | Server heartbeat every 30s | `{}` |
+| `pong` | Reply to client `ping` | `{}` |
+| `auth_expired` | Before a `4001` close | `{}` |
+| `<entity event>` | Live event for a subscribed entity | `seq`, `entity_id`, `channel`, event-specific data |
+
+Entity events carry the same payloads as their HTTP NDJSON counterparts. See [NDJSON streaming protocol](/streaming/ndjson-protocol) for event shapes.
+
+### Auto-progression events
+
+Several entity events are emitted by background hooks rather than direct user action. They follow the same envelope as any other entity event but are worth calling out so clients know to render them:
+
+| Event | Channel | When |
+|-------|---------|------|
+| `project.seeded` | `project` | After `POST /projects` finishes, with suggested competitors and features drawn from similar prior research. May arrive with empty arrays when no similar prior data exists. See [`POST /projects`](/api-reference/projects). |
+| `card.forge_ready` | `chat` | When a build node expansion produces leaves that are low-risk, small-effort, and high-confidence. Posted into the project's most recent chat session with a `Ship it` action that pre-fills [`start_implementation`](/api-reference/chat). Capped at 3 cards per expansion. See [`POST /build-nodes/{id}/expand`](/api-reference/build-nodes). |
+| `revision_updated` | `brief` | When a Forge PR is appended to the project's progress section. The brief itself may have been auto-bootstrapped from the latest research if one did not already exist. See [Pull requests](/api-reference/forge#pull-requests). |
+
+Clients must ignore unknown event types so older builds remain forward-compatible — additional auto-progression events may be added without a version bump.
+
+## Available channels
+
+| Channel | What it tracks | Terminal statuses |
+|---------|---------------|-------------------|
+| `research` | Research jobs | `completed`, `failed` |
+| `build` | Build graphs | `ready`, `failed` |
+| `brief` | Briefs | `ready`, `failed` |
+| `forge` | Forge coding runs | `completed`, `failed`, `cancelled`, `rejected` |
+| `feature_research` | Feature deep research | `completed`, `failed` |
+| `chat` | Chat sessions | `completed`, `failed` |
+| `signal_crawl` | Competitive monitor crawls | `completed`, `failed` |
+| `company_enrich` | Company enrichment | `enriched`, `failed` |
+| `implement` | Implementation sessions | `completed`, `failed` |
+| `learning` | Background learning jobs | `completed`, `failed` |
+| `project` | Project-scoped fanout — research, build, brief, Forge, chat, and agent events for a single project | none (long-lived) |
+
+<Note>
+  The `project` channel does not have terminal statuses — it stays open as long as the project exists and fans in events from every per-domain channel that carries a `project_id`. Subscribe with `entity_id` set to the project UUID. Use `GET /projects/:id/home` to bootstrap the screen, then pass the returned `ws.last_event_seq` as `cursor` to resume without gaps. Per-domain channels remain available for clients that only need a single domain's events.
+</Note>
+
+## Connection lifecycle
+
+- **Idle timeout:** 90 seconds. Keep the connection alive by sending `ping` frames or subscribing to active channels.
+- **Server heartbeat:** the server sends a `ping` frame every 30 seconds.
+- **Auth revalidation:** your session is re-checked every 5 minutes. If it has expired, you receive an `auth_expired` frame followed by close code `4001`. Re-authenticate and reconnect.
+
+## Close codes
+
+| Code | Meaning |
+|------|---------|
+| `1000` | Normal close or idle timeout |
+| `1001` | Server shutdown |
+| `4001` | Auth expired — re-authenticate and reconnect |
+| `4002` | Missing or invalid token |
+| `4003` | Replaced by a newer connection from the same user |
+
+## JavaScript example
+
+This example connects, handles the catchup frame, subscribes to a research job, and processes incoming events:
+
+```javascript
+class ManticScoreWebSocket {
+  constructor(token) {
+    this.token = token;
+    this.ws = null;
+  }
+
+  connect() {
+    const url = `wss://api.manticscore.com/ws?token=${this.token}`;
+    this.ws = new WebSocket(url);
+
+    this.ws.addEventListener("message", (e) => {
+      const frame = JSON.parse(e.data);
+      this.handleFrame(frame);
+    });
+
+    this.ws.addEventListener("close", (e) => {
+      console.log(`Closed: ${e.code} ${e.reason}`);
+      if (e.code === 4001) {
+        // Re-authenticate, then reconnect
+      } else if (e.code !== 1000) {
+        setTimeout(() => this.connect(), 2000); // backoff reconnect
+      }
+    });
+  }
+
+  handleFrame(frame) {
+    switch (frame.event) {
+      case "connected":
+        console.log("Connected as", frame.data.user_id);
+        break;
+
+      case "catchup":
+        // Subscribe to any in-flight jobs
+        for (const job of frame.data.in_flight) {
+          this.subscribe(job.entity_id, job.channel, job.last_event_seq);
+        }
+        break;
+
+      case "subscribed":
+        console.log(
+          `Subscribed to ${frame.data.channel}/${frame.data.entity_id}`,
+          `(replayed ${frame.data.replayed} events)`
+        );
+        break;
+
+      case "stage":
+        console.log(`Stage: ${frame.data.name} → ${frame.data.status}`);
+        break;
+
+      case "result":
+        console.log("Result received:", frame.data);
+        break;
+
+      case "done":
+        // The server auto-unsubscribes after done
+        console.log("Job complete for", frame.data.entity_id);
+        break;
+
+      default:
+        // Forward-compatible: ignore unknown event types
+        break;
+    }
+  }
+
+  subscribe(entityId, channel, cursor = 0) {
+    this.ws.send(
+      JSON.stringify({ action: "subscribe", entity_id: entityId, channel, cursor })
+    );
+  }
+
+  unsubscribe(entityId) {
+    this.ws.send(JSON.stringify({ action: "unsubscribe", entity_id: entityId }));
+  }
+
+  ping() {
+    this.ws.send(JSON.stringify({ action: "ping" }));
+  }
+}
+
+// Usage
+const socket = new ManticScoreWebSocket("your-session-token");
+socket.connect();
+
+// Subscribe to a specific research job from scratch
+socket.subscribe("your-job-uuid", "research", 0);
+```
+
+<Tip>
+  If you use the WebSocket for long sessions, set up a client-side `ping` interval (every 60s or so) to prevent the 90-second idle timeout from closing your connection.
+</Tip>

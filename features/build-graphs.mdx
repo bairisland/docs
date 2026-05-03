@@ -1,0 +1,265 @@
+---
+title: "Turn research into an implementable build tree"
+description: "Build a task tree from research. Each node gets a spec, risk rating, and effort estimate — then expand, implement with Forge, or export to Linear and Jira."
+---
+
+A Build Graph converts your research output into a concrete build plan. You select the features you want to build, and ManticScore generates a recursive tree of implementable tasks — each with a name, description, technical spec, acceptance criteria, and a risk rating. You can expand any node deeper, get an AI effort and confidence assessment, update task status as you work, and kick off a Forge run to generate code directly from a node's spec. The graph grows with your project and stays in sync with your work.
+
+## What a node contains
+
+Every node in the tree is self-contained and actionable:
+
+```json
+{
+  "id": "uuid",
+  "name": "Implement invoice PDF generation",
+  "description": "Generate a PDF from a completed invoice record using a template engine.",
+  "risk": "yellow",
+  "node_status": "collapsed",
+  "user_status": "pending",
+  "confidence": null,
+  "effort": null,
+  "spec": {
+    "objective": "Produce a downloadable PDF from an invoice record",
+    "constraints": ["Must render within 2 seconds", "Must be accessible on mobile"],
+    "acceptance_criteria": ["PDF matches invoice data exactly", "Download link is generated and stored"],
+    "test_checklist": ["Test with zero line items", "Test with 50+ line items"]
+  },
+  "children": []
+}
+```
+
+**Risk** uses a traffic-light scale: `green` (straightforward), `yellow` (some unknowns), `red` (high uncertainty or external dependencies).
+
+**Node status** tracks where the AI is in expanding this node: `collapsed`, `expanding`, `expanded`, `leaf`, or `implementing`.
+
+**User status** tracks your progress: `pending`, `in_progress`, `done`, or `skipped`.
+
+## Creating a build graph
+
+<Steps>
+  <Step title="Select features">
+    Choose which features from your research you want to include. Each feature needs an `id`, `label`, and `source`. You can also pass `auto_select: true` to let ManticScore choose based on your research's build readiness data.
+  </Step>
+
+  <Step title="Submit the request">
+    Send `POST /build-graphs`. The graph is created and generation begins in the background — you receive a `graph_id` immediately.
+
+    <ParamField body="features" type="array" required>
+      Features to include in the graph. Each item: `{"id": "string", "label": "string", "source": "string"}`.
+    </ParamField>
+
+    <ParamField body="idea" type="string" required>
+      Your product idea, up to 5,000 characters.
+    </ParamField>
+
+    <ParamField body="project_id" type="string">
+      UUID of an existing project. Pass `null` to leave unattached.
+    </ParamField>
+
+    <ParamField body="auto_select" type="boolean" default="false">
+      When `true`, ManticScore reads your research's build readiness data and selects features automatically.
+    </ParamField>
+
+    <CodeGroup>
+
+    ```bash curl
+    curl --request POST \
+      --url https://api.manticscore.com/build-graphs \
+      --header 'Authorization: Bearer <token>' \
+      --header 'Content-Type: application/json' \
+      --data '{
+        "features": [
+          {"id": "feat_001", "label": "Automated invoice generation", "source": "research"},
+          {"id": "feat_002", "label": "Time tracking with project tagging", "source": "research"}
+        ],
+        "idea": "A mobile app that helps freelancers track time and automatically generate invoices",
+        "project_id": "proj_uuid_here",
+        "auto_select": false
+      }'
+    ```
+
+    ```python python
+    import requests
+
+    response = requests.post(
+        "https://api.manticscore.com/build-graphs",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "features": [
+                {"id": "feat_001", "label": "Automated invoice generation", "source": "research"},
+                {"id": "feat_002", "label": "Time tracking with project tagging", "source": "research"},
+            ],
+            "idea": "A mobile app that helps freelancers track time and automatically generate invoices",
+            "project_id": "proj_uuid_here",
+            "auto_select": False,
+        },
+    )
+    print(response.json())
+    # {"graph_id": "c3d4e5f6-...", "status": "initializing"}
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Stream the build events">
+    Connect to the events stream to watch nodes appear as the graph is generated.
+
+    ```bash curl
+    curl --request GET \
+      --url 'https://api.manticscore.com/build-graphs/c3d4e5f6-.../events?cursor=0' \
+      --header 'Authorization: Bearer <token>'
+    ```
+  </Step>
+</Steps>
+
+## Build graph events
+
+The stream follows the [NDJSON v1 protocol](/streaming/ndjson-protocol) and supports cursor-based resume.
+
+| Event | Data |
+|---|---|
+| `stream_start` | Stream confirmed open |
+| `graph_created` | Graph row created; includes `graph_id` and `project_id` |
+| `stage` | LLM stage started or completed |
+| `node_created` | A new node added to the tree |
+| `graph_ready` | Initial generation complete; includes root count and total duration |
+| `expand_start` | A node expansion has begun |
+| `expand_done` | Expansion finished; includes child count |
+| `error` | Non-retryable failure |
+| `done` | Stream closed |
+
+Each `node_created` event includes:
+
+```json
+{
+  "v": 1,
+  "event": "node_created",
+  "data": {
+    "id": "uuid",
+    "node_key": "invoice.pdf_generation",
+    "depth": 1,
+    "name": "Implement invoice PDF generation",
+    "description": "Generate a downloadable PDF from a completed invoice record.",
+    "risk": "yellow",
+    "node_status": "collapsed"
+  }
+}
+```
+
+## Working with nodes
+
+Once the graph is ready, you can interact with individual nodes.
+
+### Expand a node
+
+Nodes start collapsed. Expanding a node generates its children — the sub-tasks needed to complete it. Expansion runs in the background and emits events on the graph stream.
+
+<CodeGroup>
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/build-nodes/node_uuid_here/expand \
+  --header 'Authorization: Bearer <token>'
+```
+
+```python python
+import requests
+
+response = requests.post(
+    "https://api.manticscore.com/build-nodes/node_uuid_here/expand",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(response.json())
+# {"node_id": "uuid", "graph_id": "uuid", "status": "expanding"}
+```
+
+</CodeGroup>
+
+### Assess a node
+
+Get an AI-generated risk and effort assessment for a node:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/build-nodes/node_uuid_here/assess \
+  --header 'Authorization: Bearer <token>'
+```
+
+Returns `confidence` (`low`, `medium`, or `high`) and `effort` (`small`, `medium`, `large`, or `very_large`), along with a list of unknowns the AI flagged.
+
+### Update user status
+
+Mark a node as in progress, done, or skipped as you work:
+
+```bash curl
+curl --request PATCH \
+  --url https://api.manticscore.com/build-nodes/node_uuid_here \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{"user_status": "in_progress"}'
+```
+
+You can also update `name` and `description` if you want to adjust the AI-generated text.
+
+### Implement a node with Forge
+
+Turn a node directly into a pull request. ManticScore passes the node's spec to [Forge](/features/forge), which plans and writes the code autonomously.
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/build-nodes/node_uuid_here/implement \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "repo": "your-org/your-repo",
+    "mode": "create_pr"
+  }'
+```
+
+Track progress via `GET /forge/runs/{run_id}/events`.
+
+### Create a ticket
+
+Export a node as a Linear or Jira issue, using your connected defaults:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/build-nodes/node_uuid_here/ticket \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{"target": "linear"}'
+```
+
+### Export to Notion
+
+Export a node as a structured Notion page:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/build-nodes/node_uuid_here/doc \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{"target": "notion"}'
+```
+
+## Fetching a complete graph
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/build-graphs/c3d4e5f6-... \
+  --header 'Authorization: Bearer <token>'
+```
+
+Returns the full graph with all nodes assembled into a tree under the `nodes` field.
+
+## Limits and credits
+
+| | Value |
+|---|---|
+| Credit cost | 1 credit per build graph |
+| Max idea length | 5,000 characters |
+
+<Note>
+If the latest completed feature research for your project exists, ManticScore automatically injects it into the build graph generation prompt — no extra configuration needed.
+</Note>

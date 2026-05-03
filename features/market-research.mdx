@@ -1,0 +1,299 @@
+---
+title: "Run AI-powered market research on any product idea"
+description: "Submit a product idea and receive a structured competitive analysis: incumbents, emerging players, key features, market signals, and white-space opportunities."
+---
+
+Market Research is the starting point for most work in ManticScore. You submit a plain-language product idea and the platform runs a five-stage AI pipeline — interpret, search, judge, analyze, and persist — that returns a complete competitive landscape: who already exists in the space, what features matter, where gaps remain, and how strong the opportunity looks overall. Results are cached and versioned, so you can rerun research on the same idea over time and compare what changed.
+
+## How the pipeline works
+
+Each research job progresses through five stages. You can watch them in real time by streaming the events endpoint.
+
+| Stage | What happens |
+|---|---|
+| **interpret** | The AI parses your idea into a structured problem and target market |
+| **search** | Web searches are run to collect competitor and market data |
+| **judge** | An LLM evaluates the quality of retrieved sources (non-blocking) |
+| **analyze** | The collected data is analyzed into structured insights |
+| **persist** | Results are saved and a quality score is computed |
+
+<Note>
+The judge stage scores retrieval quality but never blocks a run. Even if it fails, the pipeline continues and you still receive full results.
+</Note>
+
+## Starting a research job
+
+Send a `POST /research` request with your idea. The endpoint returns immediately with a job ID — research runs in the background.
+
+<ParamField body="idea" type="string" required>
+  Your product idea, up to 5,000 characters. Write it as you would describe it to a colleague.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  UUID of an existing project to attach this research to. Pass `null` to keep it unattached.
+</ParamField>
+
+<ParamField body="mode" type="string" default="market">
+  Research mode. Use `market` for standard competitive analysis. Use `feature` to automatically chain into [Feature Deep Research](/features/feature-research) on the top 5 features once market research completes.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/research \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "idea": "A mobile app that helps freelancers track time and automatically generate invoices from project notes",
+    "project_id": null,
+    "mode": "market"
+  }'
+```
+
+```python python
+import requests
+
+response = requests.post(
+    "https://api.manticscore.com/research",
+    headers={"Authorization": "Bearer <token>"},
+    json={
+        "idea": "A mobile app that helps freelancers track time and automatically generate invoices from project notes",
+        "project_id": None,
+        "mode": "market",
+    },
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+**Response 202** — new job queued:
+
+```json
+{
+  "job_id": "a1b2c3d4-...",
+  "status": "queued",
+  "position": 0
+}
+```
+
+**Response 200** — cache hit (identical idea already analyzed):
+
+```json
+{
+  "job_id": "a1b2c3d4-...",
+  "cache_action": "clone",
+  "status": "completed"
+}
+```
+
+<Tip>
+Use an `Idempotency-Key` header to safely retry the request without starting duplicate jobs.
+</Tip>
+
+## Streaming progress events
+
+Once you have a `job_id`, connect to the events endpoint to receive real-time updates. The stream uses newline-delimited JSON (NDJSON) and supports cursor-based resume — if you disconnect, reconnect with `cursor=<last_seq>` to replay missed events.
+
+```bash curl
+curl --request GET \
+  --url 'https://api.manticscore.com/research/a1b2c3d4-.../events?cursor=0' \
+  --header 'Authorization: Bearer <token>'
+```
+
+Each line of the stream is a JSON object:
+
+```json
+{"v": 1, "event": "stage", "data": {"name": "search", "status": "completed", "queries": 12, "sources": 34, "duration_ms": 8200}}
+```
+
+### Event types
+
+<AccordionGroup>
+  <Accordion title="stream_start">
+    Emitted immediately on connection. Confirms the stream is live.
+
+    ```json
+    {"v": 1, "event": "stream_start", "data": {"request_id": "req_abc", "job_id": "a1b2c3d4-..."}}
+    ```
+  </Accordion>
+
+  <Accordion title="stage">
+    Emitted when each pipeline stage starts, completes, is skipped, or fails. Includes timing and counts when available.
+
+    ```json
+    {
+      "v": 1,
+      "event": "stage",
+      "data": {
+        "name": "analyze",
+        "status": "completed",
+        "duration_ms": 14300
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="progress">
+    Free-text progress messages within a stage.
+
+    ```json
+    {"v": 1, "event": "progress", "data": {"stage": "search", "message": "Fetching competitor pricing pages..."}}
+    ```
+  </Accordion>
+
+  <Accordion title="result">
+    Emitted once when the job completes. Contains the full research artifact.
+
+    ```json
+    {
+      "v": 1,
+      "event": "result",
+      "data": {
+        "job_id": "a1b2c3d4-...",
+        "id": "a1b2c3d4-...",
+        "idea": "...",
+        "status": "completed",
+        "interpretation": {},
+        "incumbents": [],
+        "emerging": [],
+        "features": [],
+        "signals": [],
+        "white_spaces": [],
+        "quality": {}
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="done">
+    Signals the stream is finished. Always the final event.
+
+    ```json
+    {"v": 1, "event": "done", "data": {}}
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Checking job status
+
+Poll the status endpoint if you prefer not to stream:
+
+<CodeGroup>
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/research/a1b2c3d4-.../status \
+  --header 'Authorization: Bearer <token>'
+```
+
+```python python
+import requests
+
+response = requests.get(
+    "https://api.manticscore.com/research/a1b2c3d4-.../status",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+```json
+{
+  "status": "running",
+  "last_event_seq": 15
+}
+```
+
+## Research result shape
+
+Once completed, the result contains the following top-level fields:
+
+<ResponseField name="id" type="string" required>
+  UUID of this research job.
+</ResponseField>
+
+<ResponseField name="idea" type="string" required>
+  The original idea text you submitted.
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  Final status: `completed` or `failed`.
+</ResponseField>
+
+<ResponseField name="interpretation" type="object">
+  Structured parse of your idea: problem statement, target user, product type, and market category.
+</ResponseField>
+
+<ResponseField name="incumbents" type="array">
+  Established competitors in the space, each with name, description, key features, and positioning.
+</ResponseField>
+
+<ResponseField name="emerging" type="array">
+  Newer or smaller players that are gaining traction but haven't reached scale.
+</ResponseField>
+
+<ResponseField name="features" type="array">
+  Features that matter in this market, ranked by prevalence and strategic importance.
+</ResponseField>
+
+<ResponseField name="signals" type="array">
+  Recent market signals: funding rounds, product launches, hiring trends, press coverage.
+</ResponseField>
+
+<ResponseField name="white_spaces" type="array">
+  Gaps and underserved opportunities identified from the competitive landscape.
+</ResponseField>
+
+<ResponseField name="quality" type="object">
+  Quality scores and a go/no-go recommendation based on market characteristics.
+</ResponseField>
+
+## Additional actions
+
+### Compare with a previous version
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/research/a1b2c3d4-.../diff \
+  --header 'Authorization: Bearer <token>'
+```
+
+Returns a structured diff showing which competitors, features, and signals were added or removed since the previous research run on the same idea.
+
+### Get remix suggestions
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/research/a1b2c3d4-.../remix \
+  --header 'Authorization: Bearer <token>'
+```
+
+Returns three adjacent pivot ideas based on your completed research — useful when you want to explore related opportunities without starting from scratch.
+
+### Set reuse scope
+
+Control whether your research can be used as a cache source for other users:
+
+```bash curl
+curl --request PATCH \
+  --url https://api.manticscore.com/research/a1b2c3d4-.../scope \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{"reuse_scope": "public"}'
+```
+
+## Limits and credits
+
+| | Value |
+|---|---|
+| Rate limit | 10 requests / minute |
+| Credit cost | 3 credits per research job |
+| Free tier | 20 credits / day |
+| Max idea length | 5,000 characters |
+
+<Warning>
+If you hit the rate limit, your request may be captured to a retry queue rather than dropped. ManticScore will attempt to run it when capacity frees up.
+</Warning>

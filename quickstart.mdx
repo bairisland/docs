@@ -1,0 +1,358 @@
+---
+title: "Get started with ManticScore in 5 minutes"
+description: "Make your first ManticScore API call, load your profile, submit a market research job, and stream real-time progress events — all in under five minutes."
+---
+
+ManticScore exposes its full AI pipeline through a REST API at `https://api.manticscore.com`. This guide walks you through the complete flow: exchanging your Clerk JWT for a session token, loading your profile with a single bootstrap call, submitting a market research job, and streaming the results as they come in. By the end you'll have a working script you can adapt for any product idea.
+
+<Note>
+  You need a ManticScore account and a Clerk JWT before starting. See [Authentication](/authentication) for how to obtain your JWT from the Clerk dashboard or SDK.
+</Note>
+
+## Prerequisites
+
+- A ManticScore account
+- Your Clerk JWT (retrieved from the Clerk dashboard or your client SDK)
+
+---
+
+## Complete walkthrough
+
+<Steps>
+
+<Step title="Exchange your Clerk JWT for a session token">
+
+Every request to the ManticScore API uses a short-lived session token, not your raw Clerk JWT. Send your Clerk JWT to `POST /auth/session` to receive a token.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/session \
+  -H "Authorization: Bearer <your_clerk_jwt>"
+```
+
+```python python
+import httpx
+
+CLERK_JWT = "<your_clerk_jwt>"
+
+resp = httpx.post(
+    "https://api.manticscore.com/auth/session",
+    headers={"Authorization": f"Bearer {CLERK_JWT}"},
+)
+resp.raise_for_status()
+data = resp.json()
+SESSION_TOKEN = data["token"]
+print(f"Session token: {SESSION_TOKEN}")
+print(f"Expires in: {data['expires_in']}s")
+```
+
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "token": "msc_a1b2c3d4e5f6...",
+  "expires_in": 1800
+}
+```
+
+Save the `token` value. You'll pass it as a `Bearer` token on every subsequent request. The token is valid for 30 minutes — call `POST /auth/session` again with your Clerk JWT to refresh it.
+
+<Warning>
+  `POST /auth/session` only accepts a Clerk JWT, not another session token. If your token expires mid-session, re-authenticate with your original Clerk JWT.
+</Warning>
+
+</Step>
+
+<Step title="Load your profile with the bootstrap call">
+
+Before starting any work, call `GET /auth/bootstrap`. This single endpoint returns your profile, subscription details, and connected secrets in one shot — use it to confirm you're authenticated and to check your available credits.
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/auth/bootstrap \
+  -H "Authorization: Bearer <session_token>"
+```
+
+```python python
+resp = httpx.get(
+    "https://api.manticscore.com/auth/bootstrap",
+    headers={"Authorization": f"Bearer {SESSION_TOKEN}"},
+)
+resp.raise_for_status()
+profile = resp.json()
+print(f"Hello, {profile['profile']['name']}")
+print(f"Plan: {profile['subscription']['plan']}")
+print(f"Credits used: {profile['subscription']['credits_used']} / {profile['subscription']['credits_total']}")
+```
+
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "profile": {
+    "name": "Ada Lovelace",
+    "email": "ada@example.com",
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20,
+    "project_count": 5
+  },
+  "subscription": {
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20
+  },
+  "secrets": {
+    "has_github_pat": true,
+    "has_anthropic_key": false,
+    "has_openai_key": false
+  }
+}
+```
+
+<Tip>
+  Check `credits_used` vs `credits_total` before submitting research jobs. Market research costs 3 credits. Free accounts receive 20 credits per day, automatically reset every 24 hours.
+</Tip>
+
+</Step>
+
+<Step title="Submit a market research job">
+
+Send a `POST /projects/research` request with your product idea. The API queues the job immediately and returns a `job_id` you'll use to stream progress.
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/projects/research \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idea": "A Notion-like workspace for hardware engineers with built-in BOM management and supplier tracking",
+    "mode": "market"
+  }'
+```
+
+```python python
+resp = httpx.post(
+    "https://api.manticscore.com/projects/research",
+    headers={
+        "Authorization": f"Bearer {SESSION_TOKEN}",
+        "Content-Type": "application/json",
+    },
+    json={
+        "idea": "A Notion-like workspace for hardware engineers with built-in BOM management and supplier tracking",
+        "mode": "market",
+    },
+)
+resp.raise_for_status()
+job = resp.json()
+JOB_ID = job["job_id"]
+print(f"Job queued: {JOB_ID} (position {job['position']})")
+```
+
+</CodeGroup>
+
+**Request body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `idea` | string | Yes | Your product idea (max 5,000 characters) |
+| `description` | string | No | Optional additional context (defaults to `""`) |
+| `mode` | string | No | `market` (default) or `feature` |
+
+**Response 202 — queued:**
+
+```json
+{
+  "project_id": "9a3f2c1e-...",
+  "job_id": "b4e7d8a0-...",
+  "status": "queued",
+  "position": 0
+}
+```
+
+<Note>
+  If ManticScore has seen a similar idea before, it may return `200` with `"cache_action": "clone"` and `"status": "completed"` — meaning results are already available and no streaming is needed.
+</Note>
+
+</Step>
+
+<Step title="Stream progress events">
+
+Connect to `GET /research/{job_id}/events` to receive real-time progress over NDJSON. Each line is a JSON object describing a stage, progress update, or final result.
+
+<CodeGroup>
+
+```bash curl
+curl -N https://api.manticscore.com/research/<job_id>/events \
+  -H "Authorization: Bearer <session_token>"
+```
+
+```python python
+import json
+
+with httpx.stream(
+    "GET",
+    f"https://api.manticscore.com/research/{JOB_ID}/events",
+    headers={"Authorization": f"Bearer {SESSION_TOKEN}"},
+    timeout=None,
+) as r:
+    for line in r.iter_lines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        etype = event.get("event")
+        data = event.get("data", {})
+
+        if etype == "stage":
+            print(f"Stage: {data.get('name')}")
+        elif etype == "progress":
+            print(f"Progress: {data}")
+        elif etype == "result":
+            print("Research complete!")
+            print(json.dumps(data, indent=2))
+        elif etype == "error":
+            print(f"Error: {data}")
+        elif etype == "done":
+            print("Stream closed.")
+            break
+```
+
+</CodeGroup>
+
+**Sample stream output:**
+
+```
+{"v": 1, "event": "stream_start", "data": {}}
+{"v": 1, "event": "stage", "data": {"name": "interpret"}}
+{"v": 1, "event": "stage", "data": {"name": "search"}}
+{"v": 1, "event": "stage", "data": {"name": "judge"}}
+{"v": 1, "event": "stage", "data": {"name": "analyze"}}
+{"v": 1, "event": "stage", "data": {"name": "synthesize"}}
+{"v": 1, "event": "stage", "data": {"name": "persist"}}
+{"v": 1, "event": "result", "data": {"incumbents": [...], "emerging": [...], "features": [...], ...}}
+{"v": 1, "event": "done", "data": {}}
+```
+
+**Event types:**
+
+| Event | Description |
+|---|---|
+| `stream_start` | Stream opened; pipeline is starting |
+| `stage` | A named pipeline stage has begun (`interpret`, `search`, `judge`, `analyze`, `synthesize`, `persist`) |
+| `progress` | Incremental progress update within a stage |
+| `result` | Final research output — parse this for results |
+| `error` | A non-fatal error occurred in the pipeline |
+| `done` | Stream is complete; safe to disconnect |
+
+<Tip>
+  Parse on the `event` field and ignore any unknown event types — new event types may be added without breaking existing clients.
+</Tip>
+
+</Step>
+
+</Steps>
+
+---
+
+## Complete Python example
+
+Here is the full end-to-end script combining all four steps:
+
+```python quickstart.py
+import json
+import httpx
+
+BASE_URL = "https://api.manticscore.com"
+CLERK_JWT = "<your_clerk_jwt>"
+
+
+def main():
+    # Step 1: Exchange Clerk JWT for session token
+    resp = httpx.post(
+        f"{BASE_URL}/auth/session",
+        headers={"Authorization": f"Bearer {CLERK_JWT}"},
+    )
+    resp.raise_for_status()
+    token = resp.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Step 2: Bootstrap — load profile
+    resp = httpx.get(f"{BASE_URL}/auth/bootstrap", headers=headers)
+    resp.raise_for_status()
+    profile = resp.json()["profile"]
+    print(f"Logged in as {profile['name']} ({profile['plan']} plan)")
+    print(f"Credits: {profile['credits_used']}/{profile['credits_total']}")
+
+    # Step 3: Submit market research
+    resp = httpx.post(
+        f"{BASE_URL}/projects/research",
+        headers={**headers, "Content-Type": "application/json"},
+        json={
+            "idea": "A Notion-like workspace for hardware engineers with BOM management",
+            "mode": "market",
+        },
+    )
+    resp.raise_for_status()
+    job = resp.json()
+    job_id = job["job_id"]
+
+    # Handle cache hit
+    if job.get("cache_action") == "clone":
+        print(f"Cache hit — results already available for project {job['project_id']}")
+        return
+
+    print(f"Job queued: {job_id} (position {job['position']})")
+
+    # Step 4: Stream events
+    with httpx.stream(
+        "GET",
+        f"{BASE_URL}/research/{job_id}/events",
+        headers=headers,
+        timeout=None,
+    ) as r:
+        for line in r.iter_lines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            etype = event.get("event")
+            data = event.get("data", {})
+
+            if etype == "stage":
+                print(f"  → Stage: {data.get('name')}")
+            elif etype == "result":
+                print("\nResearch complete!")
+                incumbents = data.get("incumbents", [])
+                print(f"Found {len(incumbents)} incumbent competitors")
+            elif etype == "done":
+                break
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Authentication" icon="key" href="/authentication">
+    Learn about session token TTLs, refreshing tokens, and error handling.
+  </Card>
+  <Card title="Market research" icon="magnifying-glass-chart" href="/features/market-research">
+    Explore the full research response schema and how to read results.
+  </Card>
+  <Card title="NDJSON streaming" icon="wave-pulse" href="/streaming/ndjson-protocol">
+    Understand the streaming protocol and reconnection with cursors.
+  </Card>
+  <Card title="Credits" icon="coins" href="/account/credits">
+    See how credits work and what each operation costs.
+  </Card>
+</Columns>

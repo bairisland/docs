@@ -1,0 +1,323 @@
+---
+title: "Monitor competitors for real-time intelligence signals"
+description: "Monitor competitors for product launches, job postings, and press releases. Signals are relevance-scored and paired with AI insights for your market context."
+---
+
+Competitive Signals lets you build a watchlist of companies and topics, then automatically monitors them for activity that matters to your product. When a competitor launches a feature, posts a surge of engineering jobs, or issues a press release, ManticScore detects it, generates an AI insight explaining its relevance, and scores it by how closely it relates to your market. You can monitor any company by domain, configure crawl frequency, and trigger immediate crawls when you need fresh data.
+
+## Adding companies to your watchlist
+
+### Search for companies to add
+
+Before adding a company, use the discovery endpoint to search by keyword and see which are already on your watchlist:
+
+<CodeGroup>
+
+```bash curl
+curl --request GET \
+  --url 'https://api.manticscore.com/signals/companies/discover?q=fintech+invoicing&limit=10' \
+  --header 'Authorization: Bearer <token>'
+```
+
+```python python
+import requests
+
+response = requests.get(
+    "https://api.manticscore.com/signals/companies/discover",
+    params={"q": "fintech invoicing", "limit": 10},
+    headers={"Authorization": "Bearer <token>"},
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+```json
+{
+  "companies": [
+    {
+      "name": "FreshBooks",
+      "domain": "freshbooks.com",
+      "description": "Cloud accounting software for small businesses and freelancers",
+      "already_added": false
+    }
+  ],
+  "query": "fintech invoicing"
+}
+```
+
+### Add a company
+
+<ParamField body="name" type="string" required>
+  Company name.
+</ParamField>
+
+<ParamField body="domain" type="string">
+  Company domain (e.g. `freshbooks.com`). When provided, ManticScore automatically creates a monitor and enriches the company profile.
+</ParamField>
+
+<ParamField body="relationship" type="string" default="watchlist">
+  Relationship type. Currently `watchlist`.
+</ParamField>
+
+<ParamField body="sector" type="string">
+  Industry sector for context, e.g. `"fintech"` or `"productivity"`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/signals/companies \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "name": "FreshBooks",
+    "domain": "freshbooks.com",
+    "relationship": "watchlist",
+    "sector": "fintech"
+  }'
+```
+
+```python python
+import requests
+
+response = requests.post(
+    "https://api.manticscore.com/signals/companies",
+    headers={"Authorization": "Bearer <token>"},
+    json={
+        "name": "FreshBooks",
+        "domain": "freshbooks.com",
+        "relationship": "watchlist",
+        "sector": "fintech",
+    },
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+```json
+{
+  "company": {
+    "id": "f6a7b8c9-...",
+    "name": "FreshBooks",
+    "domain": "freshbooks.com"
+  }
+}
+```
+
+## Viewing signals
+
+### List all signals
+
+Fetch signals across your entire watchlist, or filter by company and type:
+
+<CodeGroup>
+
+```bash curl
+curl --request GET \
+  --url 'https://api.manticscore.com/signals?limit=50' \
+  --header 'Authorization: Bearer <token>'
+```
+
+```python python
+import requests
+
+response = requests.get(
+    "https://api.manticscore.com/signals",
+    params={"limit": 50},
+    headers={"Authorization": "Bearer <token>"},
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+Filter by company and signal type:
+
+```bash curl
+curl --request GET \
+  --url 'https://api.manticscore.com/signals?company_id=f6a7b8c9-...&signal_type=product_launch&limit=20' \
+  --header 'Authorization: Bearer <token>'
+```
+
+### Signal shape
+
+<ResponseField name="id" type="string" required>
+  Signal UUID.
+</ResponseField>
+
+<ResponseField name="company_id" type="string" required>
+  UUID of the company this signal belongs to.
+</ResponseField>
+
+<ResponseField name="signal_type" type="string" required>
+  Type of signal, e.g. `product_launch`, `job_posting`, `press_release`, `pricing_change`.
+</ResponseField>
+
+<ResponseField name="title" type="string" required>
+  Short title describing the signal.
+</ResponseField>
+
+<ResponseField name="summary" type="string" required>
+  A factual summary of what was detected.
+</ResponseField>
+
+<ResponseField name="ai_insight" type="string" required>
+  AI-generated interpretation of why this signal is relevant to your market.
+</ResponseField>
+
+<ResponseField name="relevance_score" type="number" required>
+  Relevance score from 0 to 1. Higher scores indicate stronger relevance to your product space.
+</ResponseField>
+
+<ResponseField name="source_url" type="string" required>
+  The URL where this signal was detected.
+</ResponseField>
+
+<ResponseField name="detected_at" type="string" required>
+  ISO 8601 timestamp of when the signal was first detected.
+</ResponseField>
+
+<ResponseField name="company_name" type="string" required>
+  Display name of the company.
+</ResponseField>
+
+<ResponseField name="company_logo_url" type="string">
+  Logo URL for the company, if available.
+</ResponseField>
+
+## Company profiles
+
+Get a full company profile including a 30-day signal summary:
+
+<CodeGroup>
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/signals/companies/f6a7b8c9-... \
+  --header 'Authorization: Bearer <token>'
+```
+
+```python python
+import requests
+
+response = requests.get(
+    "https://api.manticscore.com/signals/companies/f6a7b8c9-...",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+The response includes a `signal_summary` object:
+
+```json
+{
+  "signal_summary": {
+    "total_30d": 12,
+    "threats": 3,
+    "opportunities": 5,
+    "recent_7d": 4
+  }
+}
+```
+
+**Threats** are signals that suggest a competitor is moving into your space or improving a capability that could hurt you. **Opportunities** are gaps or missteps you can take advantage of.
+
+## Competitive position score
+
+Get an aggregate score that reflects the overall health and activity of your competitive intelligence:
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/signals/score \
+  --header 'Authorization: Bearer <token>'
+```
+
+```json
+{
+  "score": 75,
+  "signal_count": 42,
+  "recent_count": 12
+}
+```
+
+A higher score reflects more active monitoring coverage and more recent signals.
+
+## Managing monitors
+
+A monitor is a recurring crawl job attached to a company. When you add a company with a domain, ManticScore creates a monitor automatically. You can also create them manually and configure the crawl frequency.
+
+### List monitors
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/signals/monitors \
+  --header 'Authorization: Bearer <token>'
+```
+
+### Create a monitor
+
+<CodeGroup>
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/signals/monitors \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "company_id": "f6a7b8c9-...",
+    "crawl_urls": [
+      "https://freshbooks.com/blog",
+      "https://freshbooks.com/changelog"
+    ],
+    "crawl_frequency": "daily"
+  }'
+```
+
+```python python
+import requests
+
+response = requests.post(
+    "https://api.manticscore.com/signals/monitors",
+    headers={"Authorization": "Bearer <token>"},
+    json={
+        "company_id": "f6a7b8c9-...",
+        "crawl_urls": [
+            "https://freshbooks.com/blog",
+            "https://freshbooks.com/changelog",
+        ],
+        "crawl_frequency": "daily",
+    },
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+`crawl_frequency` accepts `daily` or `weekly`.
+
+### Trigger an immediate crawl
+
+Don't wait for the scheduled crawl — trigger one now:
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/signals/monitors/monitor_uuid_here/run \
+  --header 'Authorization: Bearer <token>'
+```
+
+```json
+{"queued": true, "monitor_id": "monitor_uuid_here"}
+```
+
+<Tip>
+Use immediate crawls when a competitor makes a major announcement and you want signals surfaced right away rather than waiting for the next scheduled run.
+</Tip>
+
+## Signal streaming via WebSocket
+
+For real-time signal delivery as crawls complete, subscribe to the `signal_crawl` and `company_enrich` channels on the [WebSocket endpoint](/streaming/websocket). This is useful for building live dashboards or triggering automations the moment a signal is detected.

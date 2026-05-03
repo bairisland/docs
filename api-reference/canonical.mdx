@@ -1,0 +1,214 @@
+---
+title: "Canonical entity API — public company and feature pages"
+description: "Public, no-auth aggregates over the canonical knowledge layer. Powers the SEO surface at manticscore.com/c/{slug}."
+---
+
+The canonical layer indexes every named company and feature that appears across ManticScore research runs. These endpoints expose anonymized aggregate stats for each canonical entity — appearance counts, co-occurring features and companies, and a sitemap of every indexable slug.
+
+All endpoints on this page are public — no `Authorization` header required. Responses are aggressively cacheable and never expose `user_id`, `project_id`, or any user-identifiable data. Derivative idea texts only appear when the underlying project has been [explicitly published](/api-reference/projects#publish-a-project).
+
+## Get a canonical company
+
+Returns aggregate stats for a canonical company by slug.
+
+Rate limit: **60 requests per minute** per IP+slug pair.
+
+<ParamField path="slug" type="string" required>
+  Canonical company slug (lowercase, kebab-case).
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/public/canonical/company/expensify"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get("https://api.manticscore.com/public/canonical/company/expensify")
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "entity": {
+    "name": "Expensify",
+    "slug": "expensify",
+    "domain": "expensify.com",
+    "description": "Expense management for teams.",
+    "category": "fintech"
+  },
+  "appearance_count": 42,
+  "appearance_breakdown": {
+    "research": 38,
+    "build_node": 4
+  },
+  "top_derivative_ideas": [
+    {
+      "idea": "AI expense tracker for freelancers",
+      "created_at": "2026-04-18T10:00:00Z"
+    }
+  ],
+  "related_features": [
+    {
+      "slug": "receipt-ocr",
+      "name": "Receipt OCR",
+      "category": "capture",
+      "co_occurrences": 12
+    }
+  ],
+  "related_companies": [
+    {
+      "slug": "ramp",
+      "name": "Ramp",
+      "domain": "ramp.com",
+      "co_occurrences": 9
+    }
+  ],
+  "last_updated": "2026-04-19T08:00:00Z"
+}
+```
+
+<ResponseField name="entity" type="object" required>
+  Canonical entity descriptor: `name`, `slug`, `domain`, `description`, `category`.
+</ResponseField>
+
+<ResponseField name="appearance_count" type="number" required>
+  Total number of artifacts (research runs, build nodes, etc.) referencing this company.
+</ResponseField>
+
+<ResponseField name="appearance_breakdown" type="object" required>
+  Appearance counts grouped by `artifact_type`.
+</ResponseField>
+
+<ResponseField name="top_derivative_ideas" type="object[]" required>
+  Up to 3 anonymized idea texts from public projects that reference this company. Each entry has `idea` and `created_at`. Empty array when no published projects reference the entity.
+</ResponseField>
+
+<ResponseField name="related_features" type="object[]" required>
+  Up to 5 features that co-occur with this company in artifact links. Sorted by frequency.
+</ResponseField>
+
+<ResponseField name="related_companies" type="object[]" required>
+  Up to 5 other companies that co-occur with this one. Sorted by frequency.
+</ResponseField>
+
+<ResponseField name="last_updated" type="string">
+  ISO 8601 timestamp of the most recent canonical row update, or `null`.
+</ResponseField>
+
+Responses include `Cache-Control: public, max-age=300, s-maxage=3600` — browsers cache for 5 minutes, shared caches for 1 hour.
+
+Returns `404` if the slug does not exist.
+
+---
+
+## Get a canonical feature
+
+Returns aggregate stats for a canonical feature by slug. Slugs are not globally unique on features — when collisions exist, the most-referenced row wins.
+
+Rate limit: **60 requests per minute** per IP+slug pair.
+
+<ParamField path="slug" type="string" required>
+  Canonical feature slug.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/public/canonical/feature/receipt-ocr"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "entity": {
+    "name": "Receipt OCR",
+    "slug": "receipt-ocr",
+    "category": "capture",
+    "description": "Optical character recognition for paper and digital receipts."
+  },
+  "appearance_count": 27,
+  "appearance_breakdown": {
+    "research": 24,
+    "build_node": 3
+  },
+  "top_derivative_ideas": [],
+  "offered_by": [
+    {
+      "slug": "expensify",
+      "name": "Expensify",
+      "domain": "expensify.com",
+      "co_occurrences": 12
+    }
+  ],
+  "last_updated": "2026-04-19T08:00:00Z"
+}
+```
+
+<ResponseField name="entity" type="object" required>
+  Canonical feature descriptor: `name`, `slug`, `category`, `description`.
+</ResponseField>
+
+<ResponseField name="appearance_count" type="number" required>
+  Total number of artifacts referencing this feature.
+</ResponseField>
+
+<ResponseField name="appearance_breakdown" type="object" required>
+  Appearance counts grouped by `artifact_type`.
+</ResponseField>
+
+<ResponseField name="top_derivative_ideas" type="object[]" required>
+  Up to 3 anonymized idea texts from public projects that reference this feature.
+</ResponseField>
+
+<ResponseField name="offered_by" type="object[]" required>
+  Up to 10 companies that co-occur with this feature in artifact links. Sorted by frequency.
+</ResponseField>
+
+<ResponseField name="last_updated" type="string">
+  ISO 8601 timestamp of the most recent canonical reference, or `null`.
+</ResponseField>
+
+Same edge cache headers as the company endpoint. Returns `404` if the slug does not exist.
+
+---
+
+## Get the canonical sitemap
+
+Returns every canonical company and feature slug along with its display name and last-updated timestamp. Used by the public site to generate `sitemap.xml`.
+
+Rate limit: **30 requests per minute** per IP.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/public/canonical/sitemap"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "companies": [
+    {"slug": "expensify", "name": "Expensify", "last_updated": "2026-04-19T08:00:00Z"}
+  ],
+  "features": [
+    {"slug": "receipt-ocr", "name": "Receipt OCR", "last_updated": "2026-04-19T08:00:00Z"}
+  ]
+}
+```
+
+<ResponseField name="companies" type="object[]" required>
+  All canonical companies with non-null slug. Each entry has `slug`, `name`, and `last_updated`.
+</ResponseField>
+
+<ResponseField name="features" type="object[]" required>
+  Distinct canonical feature slugs, deduplicated by slug. Each entry has `slug`, `name`, and `last_updated`.
+</ResponseField>
+
+Responses include `Cache-Control: public, max-age=3600, s-maxage=3600` — cacheable for 1 hour at every tier.

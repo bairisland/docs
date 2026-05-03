@@ -1,0 +1,334 @@
+---
+title: "Feature deep research API — multi-competitor analysis"
+description: "Run a multi-stage competitor feature analysis, stream progress events, retrieve results with build blueprints and risk matrices, and understand auto-chaining."
+---
+
+Feature deep research runs a four-stage pipeline — scope, gather, analyze, synthesize — that examines how competitors have implemented specific features. For each feature you pass in, the pipeline identifies which competitors have built it, scrapes their implementations, analyzes patterns and edge cases, and produces a blueprint with recommended build order and a risk matrix. You can start a job manually or let it auto-chain from a completed `mode=feature` market research run.
+
+## Start feature deep research
+
+Rate limit: **5 requests per minute**.
+
+<ParamField body="features" type="object[]" required>
+  The features to analyze. Each object must have an `id`, a `name`, and a `source`.
+
+  <Expandable title="feature object properties">
+    <ParamField body="id" type="string" required>
+      A stable identifier for the feature, such as the ID from a research result.
+    </ParamField>
+    <ParamField body="name" type="string" required>
+      Human-readable feature name, e.g. `"OCR receipt scanning"`.
+    </ParamField>
+    <ParamField body="source" type="string" required>
+      Where the feature came from. Use `"research"` for features pulled from a ManticScore research run.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="idea" type="string" required>
+  The product idea that provides context for the analysis. Maximum 5,000 characters.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  UUID of the project to associate this job with. Pass `null` for unattached jobs.
+</ParamField>
+
+<ParamField body="research_id" type="string">
+  UUID of the market research run that produced the features. Providing this gives the pipeline additional context.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/feature-research \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "features": [
+      {"id": "feat_001", "name": "OCR receipt scanning", "source": "research"},
+      {"id": "feat_002", "name": "Bank sync", "source": "research"}
+    ],
+    "idea": "AI expense tracker for freelancers",
+    "project_id": "9f4e2a1b-...",
+    "research_id": "7c3d1e9a-..."
+  }'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/feature-research",
+    headers={"Authorization": "Bearer <token>"},
+    json={
+        "features": [
+            {"id": "feat_001", "name": "OCR receipt scanning", "source": "research"},
+            {"id": "feat_002", "name": "Bank sync", "source": "research"},
+        ],
+        "idea": "AI expense tracker for freelancers",
+        "project_id": "9f4e2a1b-...",
+        "research_id": "7c3d1e9a-...",
+    },
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 202 response
+{
+  "job_id": "d2e7b4c1-...",
+  "status": "queued"
+}
+```
+
+Stream progress from `GET /feature-research/{job_id}/events`. Poll status from `GET /feature-research/{job_id}/status`.
+
+---
+
+## Get job metadata
+
+Returns lightweight metadata about a feature research job. Safe to poll while the job is running.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/feature-research/d2e7b4c1-..." \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "d2e7b4c1-...",
+  "status": "running",
+  "pipeline_stage": "analyze",
+  "selected_features": [
+    {"id": "feat_001", "name": "OCR receipt scanning"}
+  ],
+  "quality": {
+    "overall_score": 7.5
+  },
+  "error_detail": null,
+  "created_at": "2026-04-18T16:00:00Z",
+  "updated_at": "2026-04-18T16:20:00Z"
+}
+```
+
+<ResponseField name="status" type="string" required>
+  One of `queued`, `running`, `completed`, `failed`.
+</ResponseField>
+
+<ResponseField name="pipeline_stage" type="string" required>
+  Current stage in the pipeline: `queued`, `scope`, `gather`, `analyze`, `synthesize`, `completed`.
+</ResponseField>
+
+<ResponseField name="selected_features" type="object[]">
+  The features the pipeline is processing, with their resolved IDs and names.
+</ResponseField>
+
+<ResponseField name="quality" type="object">
+  <Expandable title="properties">
+    <ResponseField name="overall_score" type="number">
+      Quality score on a 0–10 scale. Only meaningful once the job is completed.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="error_detail" type="string">
+  Present only on `failed` status. Human-readable description of what went wrong.
+</ResponseField>
+
+---
+
+## Get job status (lightweight)
+
+Returns only the status fields without the feature list. Suitable for frequent polling.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/feature-research/d2e7b4c1-.../status" \
+  -H "Authorization: Bearer <token>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "status": "analyze",
+  "last_event_seq": 12,
+  "pipeline_stage": "analyze"
+}
+```
+
+Use `last_event_seq` as the `cursor` when reconnecting to the events stream.
+
+---
+
+## Get full results
+
+Returns the complete analysis output. Only available once the job has `status: completed`.
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/feature-research/d2e7b4c1-.../results" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/feature-research/d2e7b4c1-.../results",
+    headers={"Authorization": "Bearer <token>"},
+)
+data = resp.json()
+print(data["blueprint"]["strategic_summary"])
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "d2e7b4c1-...",
+  "status": "completed",
+  "selected_features": [
+    {"id": "feat_001", "name": "OCR receipt scanning"}
+  ],
+  "scope": {
+    "features": [
+      {
+        "id": "feat_001",
+        "competitors": ["Expensify", "Receipts by Wave"]
+      }
+    ]
+  },
+  "analyses": [
+    {
+      "feature_id": "feat_001",
+      "implementations": [],
+      "common_patterns": [],
+      "technical_approaches": [],
+      "edge_cases": [],
+      "oss_landscape": []
+    }
+  ],
+  "blueprint": {
+    "recommendations": [],
+    "build_order": [],
+    "risk_matrix": [],
+    "total_mvp_days": 15,
+    "strategic_summary": "OCR receipt scanning is the highest-leverage feature..."
+  },
+  "sources": [
+    {
+      "id": "src_001",
+      "url": "https://use.expensify.com/receipt-scanning",
+      "title": "Expensify SmartScan"
+    }
+  ],
+  "quality": {
+    "overall_score": 7.5,
+    "dimensions": {}
+  }
+}
+```
+
+<ResponseField name="scope" type="object">
+  The competitor set the pipeline identified for each feature during the `scope` stage.
+</ResponseField>
+
+<ResponseField name="analyses" type="object[]">
+  Per-feature analysis. Each entry contains implementations found in the wild, common design patterns, technical approaches, edge cases discovered, and the open-source landscape.
+</ResponseField>
+
+<ResponseField name="blueprint" type="object">
+  <Expandable title="properties">
+    <ResponseField name="recommendations" type="array">
+      Prioritized list of implementation recommendations.
+    </ResponseField>
+    <ResponseField name="build_order" type="array">
+      Suggested order to implement the features, accounting for dependencies.
+    </ResponseField>
+    <ResponseField name="risk_matrix" type="array">
+      Identified risks per feature with severity ratings.
+    </ResponseField>
+    <ResponseField name="total_mvp_days" type="number">
+      Estimated total days to reach an MVP across all analyzed features.
+    </ResponseField>
+    <ResponseField name="strategic_summary" type="string">
+      Narrative summary of the overall feature strategy.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="sources" type="object[]">
+  Web sources the pipeline consulted during the `gather` stage.
+</ResponseField>
+
+Returns `409` if the job has not yet completed. Poll `GET /feature-research/{job_id}/status` first and only call this endpoint when `status` is `completed`.
+
+---
+
+## Stream feature research events
+
+Subscribe to live progress for a feature research job. The stream uses cursor-based replay — reconnect at any sequence number and receive all missed events before switching to live delivery.
+
+<ParamField query="cursor" type="number" default="0">
+  Resume from this event sequence number. Set to `0` to start from the beginning.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -N "https://api.manticscore.com/feature-research/d2e7b4c1-.../events?cursor=0" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+with httpx.stream(
+    "GET",
+    "https://api.manticscore.com/feature-research/d2e7b4c1-.../events",
+    headers={"Authorization": "Bearer <token>"},
+    params={"cursor": 0},
+) as resp:
+    for line in resp.iter_lines():
+        if line:
+            print(line)
+```
+
+</CodeGroup>
+
+Each line is a JSON object with shape `{"v": 1, "event": "<type>", "data": {...}}`. The event types are:
+
+| Event | Description |
+|-------|-------------|
+| `stage` | A pipeline stage (`scope`, `gather`, `analyze`, `synthesize`) started or completed. |
+| `progress` | Free-text progress message within a stage. |
+| `feature_analyzed` | A single feature analysis completed. Data contains the feature ID and analysis output. |
+| `result` | All features analyzed. Contains the full results payload. |
+| `error` | A fatal error occurred. Contains `message`, `code`, and `retryable`. |
+| `done` | Stream is closed. Always the last event. |
+
+<Tip>
+  If you connect with `cursor=0` to a **completed** job, the server fast-paths and returns the full result as a single `result` event. You don't need to replay the full event log.
+</Tip>
+
+---
+
+## Auto-chaining behavior
+
+Feature deep research can be triggered automatically in two ways:
+
+**From market research:** Call `POST /research` with `"mode": "feature"`. When the market research pipeline completes, it automatically starts a feature deep research job on the top 5 features it identified. You don't need to call `POST /feature-research` manually.
+
+**From build graphs:** Call `POST /build-graphs` without a `feature_research_id`. The server automatically detects the latest completed feature research job for the project and injects its data into the LLM prompt.
+
+<Note>
+  When a feature deep research job completes, the platform fires a push notification with `type: "feature_research_complete"`. If you're building a mobile client, listen for this notification to know when results are ready.
+</Note>

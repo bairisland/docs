@@ -1,0 +1,382 @@
+---
+title: "Products API — card-first idea capture, detail, and provenance"
+description: "Capture an idea and immediately get back a typed ProductCard, list a user's product cards, and fetch the full ProductDetail with evidence rows that back every competitor and market signal in the artifact."
+---
+
+The Products API is the typed surface iOS uses for card-first idea capture and review. `POST /ideas` returns a `ProductCard` in 3-5 seconds after a fast interpretation pass — the full research pipeline continues asynchronously. `GET /products/{card_id}` returns the `ProductDetail` payload including the live state, checkpoints, the synthesized artifact, and the top-20 evidence rows with provenance metadata so clients can render source links and freshness badges next to claims.
+
+<Note>
+  These endpoints coexist with the legacy `POST /research` and `GET /research/{id}/status` flow described in the [Research API](/api-reference/research). The card-first endpoints return strongly typed shapes; the legacy endpoints remain for backward compatibility.
+</Note>
+
+## Create an idea
+
+Submits a raw idea, runs a fast interpretation cascade (Sonnet, ~3-5s), and returns a `ProductCard` immediately. Full research is dispatched in the background.
+
+Every card returned from this endpoint is **guaranteed to have a non-null `project_id`** — the server auto-bridges a project row in the same transaction, and falls back through a defense-in-depth path inside the card-creation chokepoint if the primary bridge fails. Use `project_id` directly to navigate via [`GET /projects/{id}`](/api-reference/projects#get-a-project). The call is idempotent per user on the semantic content of the idea: re-submitting the same idea reuses the existing project rather than creating a duplicate.
+
+If both bridge paths fail, the request fails loudly with `500 BRIDGE_INVARIANT_VIOLATED` rather than returning a card the client can't navigate to. See [Errors](/api-reference/errors#500-bridge-invariant-violated) for the response shape.
+
+Rate limit: **20 requests per minute**.
+
+<ParamField body="idea" type="string" required>
+  The product idea or question. Between 4 and 8,000 characters.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/ideas \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"idea": "AI expense tracker for freelancers"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/ideas",
+    headers={"Authorization": "Bearer <token>"},
+    json={"idea": "AI expense tracker for freelancers"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 202 response
+{
+  "id": "f2a8c1e9-...",
+  "research_job_id": "7c3d1e9a-...",
+  "project_id": "9f4e2a1b-...",
+  "title": "AI expense tracker",
+  "product_name": "Receipt-to-Deduction",
+  "summary": "Mobile-first OCR expense capture with auto-categorization for self-employed users.",
+  "category": "fintech",
+  "state": "researching",
+  "progress_percent": 5,
+  "current_checkpoint": "interpret",
+  "created_at": "2026-04-26T09:00:00Z",
+  "updated_at": "2026-04-26T09:00:04Z"
+}
+```
+
+Subscribe to research progress through [`GET /research/{job_id}/events`](/api-reference/research#stream-research-events) using the returned `research_job_id`.
+
+### `ProductCard` fields
+
+<ResponseField name="id" type="string" required>
+  Product card UUID.
+</ResponseField>
+
+<ResponseField name="research_job_id" type="string" required>
+  UUID of the research job dispatched for this card. Use it to subscribe to streaming events.
+</ResponseField>
+
+<ResponseField name="project_id" type="string">
+  UUID of the project row linked to the card. Use it to fetch the project via [`GET /projects/{id}`](/api-reference/projects#get-a-project).
+
+  Cards returned from `POST /ideas` always have a non-null `project_id` — the server fails the request with `500 BRIDGE_INVARIANT_VIOLATED` rather than ship a card without one.
+
+  Cards returned from `GET /products` and `GET /products/{id}` may rarely be `null` if they were created before the project bridge shipped. These pre-bridge cards self-heal: the next time the card is accessed through the card-creation chokepoint (for example, when an existing research job is reattached), the server auto-bridges a project and updates the card row in place. As a defensive fallback, clients can render the card via `GET /products/{id}` while waiting for the heal to propagate.
+</ResponseField>
+
+<ResponseField name="title" type="string" required>
+  Short title generated from the idea.
+</ResponseField>
+
+<ResponseField name="product_name" type="string">
+  Suggested product name.
+</ResponseField>
+
+<ResponseField name="summary" type="string">
+  One-line summary of the idea.
+</ResponseField>
+
+<ResponseField name="category" type="string">
+  Auto-assigned product category (for example, `fintech`, `devtools`).
+</ResponseField>
+
+<ResponseField name="state" type="string" required>
+  Lifecycle state: `researching`, `completed`, or `failed`.
+</ResponseField>
+
+<ResponseField name="progress_percent" type="number">
+  Pipeline progress, 0–100.
+</ResponseField>
+
+<ResponseField name="current_checkpoint" type="string">
+  Key of the most recent pipeline checkpoint (for example, `interpret`, `search`, `analyze`, `synthesize`).
+</ResponseField>
+
+<ResponseField name="created_at" type="string" required>
+  ISO 8601 timestamp the card was created.
+</ResponseField>
+
+<ResponseField name="updated_at" type="string" required>
+  ISO 8601 timestamp the card was last updated.
+</ResponseField>
+
+---
+
+## List products
+
+Returns the authenticated user's product cards, most-recently-updated first. Reading this list automatically records a `list_viewed` behavioral event server-side — clients don't need to instrument it.
+
+Rate limit: **60 requests per minute**.
+
+<ParamField query="limit" type="number" default="20">
+  Page size. Between 1 and 100.
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Number of rows to skip. Use with `limit` for pagination.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/products?limit=20&offset=0" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/products",
+    headers={"Authorization": "Bearer <token>"},
+    params={"limit": 20, "offset": 0},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+Returns a JSON array of `ProductCard` objects, ordered by `updated_at` descending.
+
+---
+
+## Get a product
+
+Returns the full `ProductDetail` for a card the authenticated user owns: the card metadata, the original idea interpretation, classification, checkpoints, the synthesized research artifact (when available), and the top-20 evidence rows. Reading the detail records a `detail_opened` behavioral event server-side.
+
+Rate limit: **60 requests per minute**.
+
+<ParamField path="card_id" type="string" required>
+  Product card UUID.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/products/f2a8c1e9-... \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/products/f2a8c1e9-...",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "f2a8c1e9-...",
+  "card": {
+    "id": "f2a8c1e9-...",
+    "research_job_id": "7c3d1e9a-...",
+    "project_id": "9f4e2a1b-...",
+    "title": "AI expense tracker",
+    "product_name": "Receipt-to-Deduction",
+    "summary": "Mobile-first OCR expense capture with auto-categorization for self-employed users.",
+    "category": "fintech",
+    "state": "completed",
+    "progress_percent": 100,
+    "current_checkpoint": "synthesize",
+    "created_at": "2026-04-26T09:00:00Z",
+    "updated_at": "2026-04-26T09:04:18Z"
+  },
+  "idea": {
+    "raw_input": "AI expense tracker for freelancers",
+    "normalized_idea": "AI-powered expense tracking app for self-employed users",
+    "target_user": "Independent contractors and freelancers",
+    "problem_statement": "Manual expense capture is error-prone and tax-time hostile.",
+    "proposed_solution": "OCR + auto-categorization + tax-deductible flagging."
+  },
+  "classification": {
+    "category": "fintech",
+    "subcategory": "expense-management",
+    "market_type": "smb",
+    "confidence": 0.87
+  },
+  "checkpoints": [
+    {
+      "id": "...",
+      "job_id": "7c3d1e9a-...",
+      "key": "interpret",
+      "title": "Interpret idea",
+      "status": "completed",
+      "summary": "Identified target user and problem statement.",
+      "started_at": "2026-04-26T09:00:01Z",
+      "completed_at": "2026-04-26T09:00:04Z"
+    }
+  ],
+  "artifact": {
+    "id": "...",
+    "job_id": "7c3d1e9a-...",
+    "product_idea": "AI expense tracker for freelancers",
+    "product_category": "fintech",
+    "product_name": "Receipt-to-Deduction",
+    "short_title": "Tax Deduction Tracker",
+    "one_line_summary": "OCR receipt capture with deductible flagging.",
+    "market": {
+      "audience": ["Freelancers", "Gig workers"],
+      "use_cases": ["Receipt capture", "Tax deduction tracking"],
+      "competitors": [
+        {
+          "name": "Expensify",
+          "description": "Receipt OCR and expense reports.",
+          "url": "https://expensify.com",
+          "funding": "Series A — $35M",
+          "is_incumbent": true
+        }
+      ],
+      "opportunities": ["Self-employed tax-deduction focus"]
+    },
+    "recommendation": {
+      "score": 78,
+      "verdict": "promising",
+      "rationale": "Underserved freelancer tax-deduction angle within a mature category."
+    },
+    "ui_sections": []
+  },
+  "evidence": [
+    {
+      "id": "ad21c8b7-...",
+      "source_kind": "web",
+      "source_url": "https://example.com/freelancer-finance-2026",
+      "title": "Freelancer financial tooling 2026",
+      "snippet": "Forty-two percent of independent contractors miss deductible mileage expenses.",
+      "confidence": 0.92,
+      "freshness_score": 0.88,
+      "fetched_at": "2026-04-26T09:02:11Z"
+    }
+  ]
+}
+```
+
+### Response fields
+
+<ResponseField name="id" type="string" required>
+  Product card UUID. Same as `card.id`.
+</ResponseField>
+
+<ResponseField name="card" type="object" required>
+  Card metadata. See `ProductCard` shape returned by `POST /ideas` above.
+</ResponseField>
+
+<ResponseField name="idea" type="object" required>
+  Structured interpretation of the user's raw idea. Includes `raw_input`, `normalized_idea`, `target_user`, `problem_statement`, and `proposed_solution`.
+</ResponseField>
+
+<ResponseField name="classification" type="object" required>
+  Auto-assigned `category`, `subcategory`, `market_type`, and `confidence` (0-1) for the idea.
+</ResponseField>
+
+<ResponseField name="checkpoints" type="array" required>
+  Pipeline checkpoints with status and timing. Each checkpoint has `id`, `job_id`, `key`, `title`, `status`, `summary`, `started_at`, `completed_at`.
+</ResponseField>
+
+<ResponseField name="artifact" type="object">
+  The synthesized `ResearchArtifact` once research has completed. `null` while research is still running. Contains the market summary, competitors, recommendation, and renderable UI sections.
+</ResponseField>
+
+<ResponseField name="evidence" type="array" required>
+  Top-20 evidence rows backing the artifact. Sorted by `confidence` descending, then `freshness_score` descending, then `fetched_at` descending. Clients render these as source-link badges next to competitors and market signals.
+
+  Evidence rows are populated by the live research pipeline as the analyze stage completes — newly-finished cards return their sources alongside the artifact. Empty arrays mean the job hasn't reached the analyze stage yet (subscribe to research events) or completed with no attributed sources.
+  <Expandable title="properties">
+    <ResponseField name="id" type="string" required>
+      Evidence row UUID.
+    </ResponseField>
+    <ResponseField name="source_kind" type="string" required>
+      Provenance type. One of `web`, `canonical_company`, `canonical_feature`, `prior_research`. Rows written by the live pipeline are always `web`; other kinds come from canonical-entity reuse and historical backfills.
+    </ResponseField>
+    <ResponseField name="source_url" type="string">
+      Canonical URL the evidence was extracted from. May be `null` for non-web sources. Unique per `(job_id, source_url)` — re-runs don't double-write.
+    </ResponseField>
+    <ResponseField name="title" type="string">
+      Source page title or canonical entity name.
+    </ResponseField>
+    <ResponseField name="snippet" type="string">
+      Short text excerpt that supports the claim.
+    </ResponseField>
+    <ResponseField name="confidence" type="number">
+      Model-assigned confidence in the claim, 0-1. May be `null` when unscored. Live-pipeline web rows default to `0.7`; legacy backfilled rows default to `0.5`. Use this to weight or filter source-link badges client-side.
+    </ResponseField>
+    <ResponseField name="freshness_score" type="number">
+      Recency score, 0-1. Higher means more recently published or refreshed. Live-pipeline web rows default to `0.9` (fresh fetch); legacy backfilled rows default to `0.5`.
+    </ResponseField>
+    <ResponseField name="fetched_at" type="string">
+      ISO 8601 timestamp the source was fetched.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+| Status | Meaning |
+|--------|---------|
+| `200`  | Detail returned. |
+| `404`  | Product not found, or owned by another user. |
+
+---
+
+## Record a behavioral event
+
+Records a behavioral event for outcome-based learning. Most events are auto-recorded server-side by `GET /products` and `GET /products/{id}` — call this endpoint only for client-driven signals like card swipes, taps, or shares.
+
+Rate limit: **120 requests per minute**.
+
+<ParamField body="event" type="string" required>
+  Event name. Between 1 and 64 characters.
+
+  Common event names: `list_viewed`, `detail_opened`, `card_viewed`, `section_expanded`, `card_completed`, `build_started`, `share_tapped`.
+
+  Sending `build_started` or `share_tapped` also reinforces the canonical entities cited in the card's artifact, surfacing high-converting companies and features earlier in future retrieval. Other event names are recorded but do not feed the outcome loop.
+</ParamField>
+
+<ParamField body="card_id" type="string">
+  Product card UUID, when the event relates to a specific card.
+</ParamField>
+
+<ParamField body="job_id" type="string">
+  Research job UUID, when the event relates to a specific research run.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  Project UUID, when the event relates to a specific project.
+</ParamField>
+
+<ParamField body="payload" type="object" default="{}">
+  Free-form metadata (numbers, strings, nested objects) to attach to the event.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/products/events \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"event": "card_shared", "card_id": "f2a8c1e9-...", "payload": {"channel": "imessage"}}'
+```
+
+</CodeGroup>
+
+Returns `204 No Content` on success.

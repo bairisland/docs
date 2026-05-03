@@ -1,0 +1,514 @@
+---
+title: "Clips API — public share pages and session replays"
+description: "Read public clip pages, resolve session-replay audio to short-lived signed URLs, and text yourself an App Clip link over iMessage."
+---
+
+Clips are the public share surface for ManticScore. Briefs become clip pages at `manticscore.com/clip/brief-...`, research shares become `manticscore.com/clip/research-...`, and voice-agent sessions become `manticscore.com/clip/session-...`. The endpoints below back those pages — they read the clip content from the CMS, resolve audio storage keys to short-lived signed URLs, and let an authenticated user text a clip link to their own phone over iMessage.
+
+To create a clip, see [`POST /briefs/{brief_id}/publish-clip`](/api-reference/briefs) and [`POST /research/{job_id}/share`](/api-reference/research). The endpoints on this page are for reading and distributing clips that already exist.
+
+## Read a clip page (public)
+
+Returns the structured content backing a public clip page. No authentication required.
+
+Content-negotiated: returns a rendered HTML landing page by default (with Open Graph meta tags for iMessage, Slack, and Twitter previews), or the structured JSON payload when you pass `Accept: application/json`. iOS App Clips request JSON; browsers and link previewers get HTML.
+
+Rate limit: **30 requests per minute** per IP.
+
+<ParamField path="slug" type="string" required>
+  Clip slug — for example `brief-e3f8a1d2`, `research-abc123xyz`, or `session-...`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/clip/brief-e3f8a1d2" \
+  -H "Accept: application/json"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/clip/brief-e3f8a1d2",
+    headers={"Accept": "application/json"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "id": "5a7f2c93-...",
+  "title": "AI expense tracker for freelancers",
+  "slug": "brief-e3f8a1d2",
+  "description": "A market brief covering incumbents, emerging players, and white space.",
+  "og_image_url": "https://manticscore.com/og/brief-e3f8a1d2.jpg",
+  "blocks": [
+    { "blockType": "hero", "heading": "...", "subheading": "..." },
+    { "blockType": "stats", "items": [{ "value": "12", "label": "incumbents" }] }
+  ],
+  "published": true,
+  "sort_order": 0,
+  "research": null
+}
+```
+
+<ResponseField name="id" type="string" required>
+  Clip page identifier from the CMS.
+</ResponseField>
+
+<ResponseField name="title" type="string" required>
+  Display title of the clip.
+</ResponseField>
+
+<ResponseField name="slug" type="string" required>
+  URL-safe identifier. Equal to the path parameter.
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Short summary suitable for Open Graph descriptions and link previews.
+</ResponseField>
+
+<ResponseField name="og_image_url" type="string">
+  Absolute URL of the Open Graph preview image. May be `null` if no custom image was generated.
+</ResponseField>
+
+<ResponseField name="blocks" type="array">
+  Ordered list of content blocks. Each block has a `blockType` field — `hero`, `stats`, `richText`, `featureList`, `callToAction`, `divider`, or `sessionReplay`. Block schemas are CMS-driven; clients should ignore unknown block types.
+</ResponseField>
+
+<ResponseField name="published" type="boolean" required>
+  `true` if the clip is publicly visible. Unpublished clips return `404`.
+</ResponseField>
+
+<ResponseField name="sort_order" type="number">
+  Display ordering hint for grouped clip listings. Defaults to `0`.
+</ResponseField>
+
+<ResponseField name="research" type="object">
+  For brief clips, an embedded read-only snapshot of the underlying research at publish time (incumbents, emerging players, features, signals, white spaces, sources). `null` for non-brief clips.
+</ResponseField>
+
+Responses are cached at the edge for 5 minutes (`Cache-Control: public, max-age=300`).
+
+Returns `404` if the slug doesn't exist or the page is unpublished, and `502` if the upstream CMS is unavailable.
+
+---
+
+## Resolve a session-replay clip to playable audio
+
+Session-replay clips embed opaque audio storage keys rather than direct URLs so that links don't rot. This endpoint reads the clip, finds every `sessionReplay` block, and resolves each storage key to a short-lived signed URL that the iOS App Clip can play directly.
+
+The master recording and every advisor recording in a session are signed in parallel — a typical 6-call advisor roundtable resolves in roughly the same wall-clock time as a single round-trip.
+
+Public, no authentication required. Rate limit: **30 requests per minute** per IP.
+
+<ParamField path="slug" type="string" required>
+  Session-replay clip slug, typically prefixed `session-`.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl "https://api.manticscore.com/clip/session-abc123/playable"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get("https://api.manticscore.com/clip/session-abc123/playable")
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "slug": "session-abc123",
+  "title": "Should I build an AI expense tracker?",
+  "description": "Voice session with the advisor roundtable.",
+  "sessions": [
+    {
+      "audio_url": "https://<project>.supabase.co/storage/v1/object/sign/sessions/session-abc123/master.m4a?token=...",
+      "transcript_segments": [
+        { "speaker": "user", "text": "...", "t": 0.0 }
+      ],
+      "advisors": [
+        {
+          "persona": "skeptical_vc",
+          "text": "...",
+          "audio_url": "https://<project>.supabase.co/storage/v1/object/sign/sessions/session-abc123/advisor-1.m4a?token=...",
+          "voice_id": "..."
+        }
+      ],
+      "research_summary": "Brief summary of the underlying research.",
+      "referrer_device_id": null,
+      "cta": {
+        "label": "Open in ManticScore",
+        "url": "https://testflight.apple.com/join/4Ym7X41D"
+      }
+    }
+  ],
+  "signed_urls_wired": true
+}
+```
+
+<ResponseField name="slug" type="string" required>
+  The clip slug. Equal to the path parameter.
+</ResponseField>
+
+<ResponseField name="title" type="string">
+  Clip title from the CMS.
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Clip description from the CMS.
+</ResponseField>
+
+<ResponseField name="sessions" type="array" required>
+  One entry per `sessionReplay` block on the clip. Most clips have a single session; the response is an array to accommodate multi-session compilations.
+
+  <Expandable title="session fields">
+    <ResponseField name="audio_url" type="string" required>
+      Signed URL for the master recording. TTL: **5 minutes**. If signing fails (Supabase unavailable, missing key, malformed response), this falls back to the raw storage key — clients should treat any value that does not parse as an HTTPS URL as unplayable rather than fail the whole render.
+    </ResponseField>
+
+    <ResponseField name="transcript_segments" type="array">
+      Time-coded transcript segments. Each segment has `speaker`, `text`, and `t` (start time in seconds). May be empty.
+    </ResponseField>
+
+    <ResponseField name="advisors" type="array">
+      Per-advisor turns within this session.
+
+      <Expandable title="advisor fields">
+        <ResponseField name="persona" type="string">
+          Advisor identifier (e.g. `skeptical_vc`, `growth_lead`).
+        </ResponseField>
+
+        <ResponseField name="text" type="string">
+          The advisor's spoken text.
+        </ResponseField>
+
+        <ResponseField name="audio_url" type="string">
+          Signed URL for the advisor's recording. Same 5-minute TTL and fallback semantics as the master `audio_url`.
+        </ResponseField>
+
+        <ResponseField name="voice_id" type="string">
+          TTS voice identifier used to render this advisor.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+
+    <ResponseField name="research_summary" type="string">
+      Short text summary of the research underpinning this session.
+    </ResponseField>
+
+    <ResponseField name="referrer_device_id" type="string">
+      Anonymous device identifier of the originating session, if known. Used for attribution; safe to ignore.
+    </ResponseField>
+
+    <ResponseField name="cta" type="object">
+      Optional call-to-action with `label` and `url` fields. Defaults to a TestFlight link when the CMS doesn't override it.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="signed_urls_wired" type="boolean" required>
+  `true` when the server is configured to mint Supabase Storage signed URLs (the default in production). When `false`, `audio_url` values may be raw storage keys rather than playable HTTPS URLs and clients should retry rather than cache the response.
+</ResponseField>
+
+When `signed_urls_wired` is `true`, responses include `Cache-Control: public, max-age=300` — matching the signed-URL TTL. When `false`, responses are returned with `Cache-Control: no-cache` so clients refetch freely.
+
+Returns `404` if the slug doesn't exist or the clip has no `sessionReplay` block (i.e. it isn't a session replay), and `502` if the upstream CMS is unavailable.
+
+<Note>
+  Signed URLs expire 5 minutes after they are minted. Re-fetch this endpoint to get fresh URLs rather than persisting them on the client.
+</Note>
+
+---
+
+## Send a clip to yourself over iMessage
+
+Texts the authenticated user a link to their own clip over iMessage. Self-delivery only — there is no recipient parameter, and no arbitrary text payload. Every iMessage ManticScore sends is exactly one App Clip URL.
+
+Requires a verified phone number on the user's profile. Link your phone via [`PATCH /profile/phone`](/api-reference/authentication) before calling this endpoint.
+
+Rate limit: **10 requests per hour** per user.
+
+<ParamField path="slug" type="string" required>
+  Clip slug to send.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/clips/brief-e3f8a1d2/send-to-me" \
+  -H "Authorization: Bearer <token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/clips/brief-e3f8a1d2/send-to-me",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "slug": "brief-e3f8a1d2",
+  "to": "+15551234567"
+}
+```
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success. Failures return non-2xx status codes.
+</ResponseField>
+
+<ResponseField name="slug" type="string" required>
+  The clip slug that was sent.
+</ResponseField>
+
+<ResponseField name="to" type="string" required>
+  E.164 phone number the message was delivered to — the verified phone on the authenticated user's profile.
+</ResponseField>
+
+Returns:
+
+- `400` — no phone number is linked to the user's profile.
+- `404` — the clip slug does not exist.
+- `502` — the upstream CMS is unavailable, or iMessage delivery failed.
+
+---
+
+## Vote on a clip's idea
+
+Records a recipient's vote on the project behind a vote clip (App Clip variant). Accepts both authenticated users and anonymous principals — recipients won't sign in just to vote, so anonymous is the dominant write path.
+
+Votes are idempotent on `(project_id, voter_principal_id)`: re-voting updates the prior vote rather than duplicating it. The first vote a project receives also fires a `votes.received` event on the [`project` channel](/streaming/websocket); subsequent re-votes are silent.
+
+Rate limit: **30 requests per hour** per principal (per anonymous device or authenticated user).
+
+<ParamField path="slug" type="string" required>
+  Vote-clip slug. The clip must contain a `voteClip` block — otherwise this returns `404`.
+</ParamField>
+
+<ParamField body="vote" type="number" required>
+  `1` for upvote, `-1` for downvote, `0` to retract a prior vote.
+</ParamField>
+
+<ParamField body="comment" type="string">
+  Optional free-text comment, up to 200 characters.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/clip/brief-e3f8a1d2/vote" \
+  -H "Content-Type: application/json" \
+  -d '{"vote": 1, "comment": "Love it"}'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/clip/brief-e3f8a1d2/vote",
+    json={"vote": 1, "comment": "Love it"},
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "total_up": 17,
+  "total_down": 3,
+  "ack_message": "Your vote was added — thanks for shaping AI expense tracker for freelancers."
+}
+```
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="total_up" type="number" required>
+  Total upvotes on this project after the request.
+</ResponseField>
+
+<ResponseField name="total_down" type="number" required>
+  Total downvotes on this project after the request.
+</ResponseField>
+
+<ResponseField name="ack_message" type="string" required>
+  Short acknowledgment string suitable for display in the App Clip after the vote lands.
+</ResponseField>
+
+Returns `404` if the slug doesn't exist or the clip is not a vote clip, and `502` if the upstream CMS is unavailable.
+
+---
+
+## Submit a roast on a clip's idea
+
+Records a recipient's voice critique (~60s) on the project behind a roast clip. Anonymous-friendly — recipients won't sign in just to leave a roast.
+
+Audio is uploaded as `multipart/form-data`. The server enforces a hard size cap on raw audio bytes (≈2 MB) — the iOS App Clip limits recordings to 60 seconds in the UI, but the server does not trust the client. Each accepted roast persists as a `clip_kind='roast'` row in the voice clips table with `parent_project_id` pointing back to the originator and emits a `roast.received` event on the [`project` channel](/streaming/websocket).
+
+Rate limit: **5 requests per hour** per principal.
+
+<ParamField path="slug" type="string" required>
+  Roast-clip slug. The clip must contain a `roast_clip` block — otherwise this returns `404`.
+</ParamField>
+
+<ParamField body="audio" type="file" required>
+  Raw audio file (recommended `audio/m4a`). Maximum ~2 MB.
+</ParamField>
+
+<ParamField body="transcript" type="string">
+  Optional plain-text transcript captured by the client.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/clip/brief-e3f8a1d2/roast" \
+  -F "audio=@roast.m4a" \
+  -F "transcript=Honestly, the pricing tiers don't make sense."
+```
+
+```python Python
+import httpx
+
+with open("roast.m4a", "rb") as f:
+    resp = httpx.post(
+        "https://api.manticscore.com/clip/brief-e3f8a1d2/roast",
+        files={"audio": ("roast.m4a", f, "audio/m4a")},
+        data={"transcript": "Honestly, the pricing tiers don't make sense."},
+    )
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "roast_id": "f1b2c3d4-...",
+  "ack_message": "Roast received — they'll hear it later."
+}
+```
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="roast_id" type="string" required>
+  UUID of the persisted roast row.
+</ResponseField>
+
+<ResponseField name="ack_message" type="string" required>
+  Short acknowledgment string for display in the App Clip after the roast is accepted.
+</ResponseField>
+
+Returns:
+
+- `404` — the slug doesn't exist or the clip is not a roast clip.
+- `413` — the uploaded audio exceeds the server-side size cap.
+- `502` — the upstream CMS is unavailable.
+
+---
+
+## Swipe through a project's research gaps
+
+Records a recipient's swipe session on a project's gap cards (App Clip variant of "swipe-the-gaps"). One request can submit up to 50 swipes; gaps are addressed by a deterministic 16-character `gap_id` derived from the project ID + normalized gap text — the same gap text always hashes to the same id, so multiple recipients converge on the same buckets.
+
+Swipes are idempotent on `(gap_id, voter_principal_id)`: re-swiping a card overrides the prior decision rather than duplicating it. Each call emits a single `gaps.swiped` event on the [`project` channel](/streaming/websocket) carrying the truncated voter id and the top-3 yes-swiped gaps.
+
+Rate limit: **60 requests per hour** per principal (~6 full 10-card sessions).
+
+<ParamField path="slug" type="string" required>
+  Swipe-clip slug. The clip must contain a `swipe_clip` block — otherwise this returns `404`.
+</ParamField>
+
+<ParamField body="swipes" type="object[]" required>
+  Array of 1–50 swipes.
+
+  <Expandable title="swipe fields">
+    <ParamField body="gap_id" type="string">
+      Stable 16-character gap identifier. If omitted, the server derives it deterministically from the project id and the normalized `gap_text`.
+    </ParamField>
+
+    <ParamField body="gap_text" type="string" required>
+      The gap statement displayed on the swipe card. Between 1 and 400 characters.
+    </ParamField>
+
+    <ParamField body="direction" type="number" required>
+      `1` for a "yes" / right swipe, `-1` for a "no" / left swipe.
+    </ParamField>
+
+    <ParamField body="comment" type="string">
+      Optional free-text comment, up to 200 characters.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST "https://api.manticscore.com/clip/brief-e3f8a1d2/swipe" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "swipes": [
+      {"gap_text": "No native Android client", "direction": 1},
+      {"gap_text": "Lacks bulk receipt import", "direction": -1}
+    ]
+  }'
+```
+
+```python Python
+import httpx
+
+resp = httpx.post(
+    "https://api.manticscore.com/clip/brief-e3f8a1d2/swipe",
+    json={
+        "swipes": [
+            {"gap_text": "No native Android client", "direction": 1},
+            {"gap_text": "Lacks bulk receipt import", "direction": -1},
+        ]
+    },
+)
+print(resp.json())
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "recorded": 2,
+  "ack_message": "Got it — you helped shape 2 gaps for AI expense tracker for freelancers."
+}
+```
+
+<ResponseField name="ok" type="boolean" required>
+  Always `true` on success.
+</ResponseField>
+
+<ResponseField name="recorded" type="number" required>
+  Number of swipes persisted from this request.
+</ResponseField>
+
+<ResponseField name="ack_message" type="string" required>
+  Short acknowledgment string for the App Clip.
+</ResponseField>
+
+Returns `404` if the slug doesn't exist or the clip is not a swipe clip, and `502` if the upstream CMS is unavailable.

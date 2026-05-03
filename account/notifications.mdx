@@ -1,0 +1,142 @@
+---
+title: "Push notifications, device tokens, and preferences"
+description: "Register your device for push notifications, manage which events trigger alerts, and set up a personal curl-able push URL for custom notifications."
+---
+
+ManticScore sends push notifications to your devices when key events happen — research completes, a build graph is ready, a new competitive signal arrives, or your weekly digest is available. You control which events trigger alerts and can register multiple devices.
+
+## Register a device
+
+When your app starts, register the device's APNS token so ManticScore knows where to send notifications.
+
+```bash
+POST /push-tokens
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "device_token": "your-apns-device-token",
+  "environment": "production"
+}
+```
+
+**Response:**
+
+```json
+{"success": true}
+```
+
+`environment` accepts `production`, `development`, or `sandbox`. Use `development` during local testing with a debug build. The request upserts — calling it again with the same token is safe.
+
+## Remove a device
+
+When a user logs out or uninstalls the app, remove their device token:
+
+```bash
+DELETE /push-tokens
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"device_token": "your-apns-device-token"}
+```
+
+## Notification preferences
+
+### View current preferences
+
+```bash
+GET /push-tokens/preferences
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "preferences": [
+    {"id": "research_complete", "label": "Research complete",      "enabled": true},
+    {"id": "build_complete",    "label": "Build graph ready",       "enabled": true},
+    {"id": "signal_alert",      "label": "New competitive signal",  "enabled": true},
+    {"id": "weekly_digest",     "label": "Weekly digest",           "enabled": true}
+  ]
+}
+```
+
+### Update a preference
+
+```bash
+POST /push-tokens/preferences
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"id": "weekly_digest", "enabled": false}
+```
+
+**Response:**
+
+```json
+{"success": true, "id": "weekly_digest", "enabled": false}
+```
+
+### Reset a preference to default
+
+```bash
+DELETE /push-tokens/preferences/weekly_digest
+Authorization: Bearer <token>
+```
+
+```json
+{"success": true, "id": "weekly_digest", "reset": true}
+```
+
+## Personal push URL
+
+ManticScore provides a curl-able push URL you can use to send yourself a notification from any script, CI pipeline, or terminal.
+
+### Mint a URL
+
+```bash
+GET /v1/notify/me
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "slug": "br_usr_a3f9c1...64hexchars",
+  "url": "https://api.manticscore.com/v1/br_usr_a3f9c1...64hexchars"
+}
+```
+
+<Warning>
+  Each call to `GET /v1/notify/me` rotates the slug. The previous URL stops working immediately. Save the URL after minting it rather than calling this endpoint each time you want to send a notification.
+</Warning>
+
+### Send a notification
+
+```bash
+POST https://api.manticscore.com/v1/<your-slug>
+Content-Type: text/plain
+
+Your deploy finished in 42s
+```
+
+**Response:**
+
+```json
+{"ok": true}
+```
+
+The notification body can be up to 1,024 bytes. The rate limit is 3 notifications per minute per slug.
+
+**Example with curl:**
+
+```bash
+curl -X POST \
+  -H "Content-Type: text/plain" \
+  -d "Build passed — all tests green" \
+  "https://api.manticscore.com/v1/$MY_NOTIFY_SLUG"
+```
+
+No `Authorization` header is required — the slug itself is the credential.
+
+<Tip>
+  Store your slug in a CI secret (e.g. `MANTICSCORE_NOTIFY_SLUG`) and call it from your deployment workflow to get a push notification when jobs complete.
+</Tip>

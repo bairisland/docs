@@ -1,0 +1,248 @@
+---
+title: "Automations: trigger actions when ManticScore events fire"
+description: "Build event-driven rules that fire when research completes, a build graph is ready, or a PR is created — send output to Slack, Linear, Jira, Notion, or more."
+---
+
+Automations let you define "when X happens, do Y" rules that ManticScore fires automatically. Configure them once and your team gets a Slack message every time research completes, Linear issues every time a build graph is ready, or a Notion page every time Forge opens a pull request — without any manual step. You can also run any of the 1000+ Composio tools as an action, making automations as flexible as your workflow requires.
+
+## Triggers and actions
+
+**Triggers** are ManticScore events that fire an automation:
+
+| Trigger | When it fires |
+|---|---|
+| `research_completed` | A market or feature research job finishes |
+| `build_graph_completed` | A build graph is fully generated |
+| `signal_detected` | A new competitive signal is detected for a monitored company |
+| `forge_pr_created` | Forge opens a pull request on GitHub |
+| `brief_ready` | A product brief finishes generating |
+
+**Actions** are the operations ManticScore runs in response:
+
+| Action | What it does |
+|---|---|
+| `slack.post` | Posts a message to a Slack channel |
+| `linear.create_issues` | Creates issues in Linear from the triggering build graph |
+| `jira.create_issues` | Creates issues in Jira from the triggering build graph |
+| `notion.export` | Exports the triggering output to a Notion page |
+| `gmail.send` | Sends an email via Gmail |
+| `composio.execute` | Runs any Composio tool with templated arguments |
+
+## Creating an automation
+
+Call `POST /automations` with a trigger, action, and any configuration the action needs.
+
+```bash
+curl -X POST https://api.manticscore.com/automations \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "trigger": "research_completed",
+    "action": "slack.post",
+    "toolkit": "slack",
+    "config": {
+      "channel": "C1234",
+      "format": "summary"
+    },
+    "enabled": true
+  }'
+```
+
+```json
+{
+  "id": "automation-uuid",
+  "trigger": "research_completed",
+  "action": "slack.post",
+  "enabled": true,
+  "created_at": "2026-04-23T10:00:00Z"
+}
+```
+
+<Note>
+The integration referenced by `toolkit` must be connected before you create the automation. ManticScore returns `400` if the toolkit is not connected when the automation fires.
+</Note>
+
+## Common automation recipes
+
+<AccordionGroup>
+  <Accordion title="Post research summaries to Slack">
+    ```bash
+    curl -X POST https://api.manticscore.com/automations \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "trigger": "research_completed",
+        "action": "slack.post",
+        "toolkit": "slack",
+        "config": { "channel": "C1234", "format": "summary" },
+        "enabled": true
+      }'
+    ```
+  </Accordion>
+  <Accordion title="Create Linear issues when a build graph is ready">
+    ```bash
+    curl -X POST https://api.manticscore.com/automations \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "trigger": "build_graph_completed",
+        "action": "linear.create_issues",
+        "toolkit": "linear",
+        "config": { "team_id": "TEAM_abc123" },
+        "enabled": true
+      }'
+    ```
+  </Accordion>
+  <Accordion title="Export build plans to Notion on completion">
+    ```bash
+    curl -X POST https://api.manticscore.com/automations \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "trigger": "build_graph_completed",
+        "action": "notion.export",
+        "toolkit": "notion",
+        "config": { "parent_id": "page-uuid" },
+        "enabled": true
+      }'
+    ```
+  </Accordion>
+  <Accordion title="Alert on competitive signals via Slack">
+    ```bash
+    curl -X POST https://api.manticscore.com/automations \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "trigger": "signal_detected",
+        "action": "slack.post",
+        "toolkit": "slack",
+        "config": { "channel": "C3456", "format": "detailed" },
+        "enabled": true
+      }'
+    ```
+  </Accordion>
+  <Accordion title="Notify via Slack when Forge opens a PR">
+    ```bash
+    curl -X POST https://api.manticscore.com/automations \
+      -H "Authorization: Bearer <token>" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "trigger": "forge_pr_created",
+        "action": "slack.post",
+        "toolkit": "slack",
+        "config": { "channel": "C9012", "format": "summary" },
+        "enabled": true
+      }'
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Listing automations
+
+```bash
+curl https://api.manticscore.com/automations \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "automations": [
+    {
+      "id": "automation-uuid",
+      "trigger": "research_completed",
+      "action": "slack.post",
+      "toolkit": "slack",
+      "config": { "channel": "C1234", "format": "summary" },
+      "enabled": true
+    }
+  ]
+}
+```
+
+## Updating an automation
+
+Use `PATCH /automations/{automation_id}` to change any field. The body is a sparse merge — you only need to include the fields you want to update.
+
+```bash
+# Disable an automation
+curl -X PATCH https://api.manticscore.com/automations/automation-uuid \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "enabled": false }'
+
+# Change the target channel
+curl -X PATCH https://api.manticscore.com/automations/automation-uuid \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "config": { "channel": "C9999", "format": "detailed" } }'
+```
+
+## Deleting an automation
+
+```bash
+curl -X DELETE https://api.manticscore.com/automations/automation-uuid \
+  -H "Authorization: Bearer <token>"
+```
+
+A successful delete returns `204 No Content`.
+
+## Running any Composio tool as an action
+
+The `composio.execute` action lets you invoke any of the 1000+ tools available in Composio — giving automations the same reach as a full Zapier or Shortcuts workflow. Provide the Composio tool slug as `action` and pass arguments in `arguments`.
+
+```bash
+curl -X POST https://api.manticscore.com/integrations/execute \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "LINEAR_CREATE_LINEAR_ISSUE",
+    "arguments": {
+      "title": "New issue from ManticScore",
+      "team_id": "TEAM_abc123"
+    },
+    "connected_account_id": null
+  }'
+```
+
+```json
+{
+  "status": "completed",
+  "action": "LINEAR_CREATE_LINEAR_ISSUE",
+  "result": {
+    "id": "LIN-99",
+    "url": "https://linear.app/acme/issue/LIN-99"
+  }
+}
+```
+
+<Tip>
+Use `POST /integrations/execute` to test a Composio action directly before wiring it to an automation. Once it works, add it as a `composio.execute` automation rule.
+</Tip>
+
+## Agent autonomy
+
+ManticScore's AI agent can run integration actions on your behalf. You control how much autonomy the agent has with three modes:
+
+| Mode | Behavior |
+|---|---|
+| `suggest` | The agent proposes an action; you approve it before it runs |
+| `confirm` | The agent asks for confirmation before executing |
+| `auto` | The agent runs the configured actions automatically, without asking |
+
+Configure autonomy with `PATCH /profile/agent-config`:
+
+```bash
+curl -X PATCH https://api.manticscore.com/profile/agent-config \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "autonomy_level": "auto",
+    "auto_actions": ["slack.post", "notion.export", "linear.create_issues"]
+  }'
+```
+
+The `auto_actions` list controls which specific actions the agent runs automatically when `autonomy_level` is `auto`. Actions not in the list still require confirmation.
+
+<Warning>
+Setting `autonomy_level` to `auto` with `linear.create_issues` or `jira.create_issues` in `auto_actions` means ManticScore will create issues in your tracker without prompting you. Start with `confirm` and switch to `auto` once you are satisfied with the output.
+</Warning>

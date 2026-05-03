@@ -1,0 +1,361 @@
+---
+title: "Authenticate with the ManticScore API"
+description: "Learn how to get a Clerk JWT, exchange it for a session token, make authenticated requests, refresh tokens, and handle auth errors."
+---
+
+ManticScore uses [Clerk](https://clerk.com) for identity. Rather than sending your Clerk JWT on every request, you exchange it once for a lightweight session token that the API validates in microseconds. Session tokens expire after 30 minutes, so you'll refresh them periodically. For zero-friction onboarding, the API also supports **anonymous sessions** — mint a session from a device id, let users try the product, and rebind their work to a Clerk account when they sign in.
+
+This page explains the full authentication lifecycle from login to logout.
+
+## How authentication works
+
+Every protected endpoint requires an `Authorization` header with a `Bearer` token:
+
+```
+Authorization: Bearer <token>
+```
+
+The API accepts two token types, checked in this order:
+
+1. **Session token** — an opaque string returned by `POST /auth/session` or `POST /auth/anonymous`. Validated via an O(1) lookup, making it the fastest path. Use this for all normal requests.
+2. **Clerk JWT** — an RS256-signed JWT from Clerk, verified against the Clerk JWKS. Used only when exchanging for a session token.
+
+Sessions come in two flavors:
+
+- **Authenticated sessions** are tied to a Clerk user id (e.g. `user_3AtP...`) and mint tokens from a Clerk JWT.
+- **Anonymous sessions** are tied to a device id, require no sign-in, and mint tokens from `POST /auth/anonymous`. When the user later signs in, call `POST /auth/rebind` once to re-own every anonymous artifact to the authenticated user.
+
+<Note>
+  Streaming endpoints (`GET /research/{id}/events`, WebSocket `/ws`, and similar) use the same bearer token. The session TTL is extended automatically when you connect to a stream.
+</Note>
+
+---
+
+## Step 1: Get your Clerk JWT
+
+ManticScore uses Clerk as its identity provider. You get a Clerk JWT from the Clerk dashboard or your Clerk client SDK — not from the ManticScore API directly.
+
+<Tabs>
+  <Tab title="Clerk dashboard">
+    1. Log in to the [Clerk dashboard](https://dashboard.clerk.com).
+    2. Open your ManticScore application.
+    3. Navigate to **Users**, select your account, and copy a short-lived JWT from the **Sessions** panel.
+
+    Use dashboard JWTs for testing and development. For production applications, generate JWTs programmatically using the Clerk SDK.
+  </Tab>
+  <Tab title="JavaScript SDK">
+    ```javascript
+    import { useAuth } from "@clerk/clerk-react";
+
+    function MyComponent() {
+      const { getToken } = useAuth();
+
+      async function callManticScore() {
+        const clerkJwt = await getToken();
+        // Pass clerkJwt to POST /auth/session
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Python SDK">
+    ```python
+    from clerk_backend_api import Clerk
+
+    client = Clerk(bearer_auth="<your_clerk_secret_key>")
+
+    # Retrieve a session JWT for a known session ID
+    session = client.sessions.get_token(
+        session_id="sess_...",
+        token_template="manticscore",
+    )
+    clerk_jwt = session.jwt
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Step 2: Exchange the JWT for a session token
+
+Send your Clerk JWT to `POST /auth/session`. The request body is empty — the JWT goes in the `Authorization` header.
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/session \
+  -H "Authorization: Bearer <your_clerk_jwt>"
+```
+
+**Response:**
+
+```json
+{
+  "token": "msc_a1b2c3d4e5f6g7h8...",
+  "expires_in": 1800
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `token` | string | Opaque session token — use this on all subsequent requests |
+| `expires_in` | integer | Seconds until expiry (always `1800` — 30 minutes) |
+
+<Warning>
+  `POST /auth/session` only accepts a Clerk JWT. Passing an already-issued session token returns a `401`. Always authenticate with your original Clerk JWT when requesting a new session.
+</Warning>
+
+---
+
+## Step 3: Make authenticated requests
+
+Include the session token as a Bearer token in every request:
+
+```bash curl
+curl https://api.manticscore.com/auth/bootstrap \
+  -H "Authorization: Bearer msc_a1b2c3d4e5f6g7h8..."
+```
+
+```python python
+import httpx
+
+headers = {"Authorization": f"Bearer {session_token}"}
+
+resp = httpx.get("https://api.manticscore.com/auth/bootstrap", headers=headers)
+resp.raise_for_status()
+print(resp.json())
+```
+
+---
+
+## Anonymous sessions (zero-friction onboarding)
+
+You can skip the Clerk exchange entirely on first launch and let users try the product without signing in. Call `POST /auth/anonymous` with a stable `device_id` and you'll get back a session token that behaves like any other — attach it on subsequent requests and the API will authorize writes under an anonymous principal.
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/anonymous \
+  -H "Content-Type: application/json" \
+  -d '{"device_id": "<device_id>"}'
+```
+
+**Response:**
+
+```json
+{
+  "token": "ms_sess_a1b2c3d4e5f6...",
+  "expires_in": 1800
+}
+```
+
+The call is idempotent on `device_id` — repeated calls for the same device reuse the same anonymous principal, so their work is preserved across launches.
+
+<Note>
+  Use a stable, per-device identifier. On iOS, `identifierForVendor` backed by the Keychain is a good choice. Don't regenerate a new `device_id` on every launch or users will see an empty account each time.
+</Note>
+
+### Rebind on sign-in
+
+When the user signs in with Clerk, call `POST /auth/rebind` once with the original `device_id` and the authenticated session token (or Clerk JWT) in the `Authorization` header. Every row written under the anonymous principal is re-owned by the Clerk user inside a single database transaction:
+
+```bash curl
+curl -X POST https://api.manticscore.com/auth/rebind \
+  -H "Authorization: Bearer <authenticated_session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"device_id": "<device_id>"}'
+```
+
+**Response:**
+
+```json
+{
+  "rebound": true,
+  "rows_updated": 14,
+  "anon_uuid": "b1e4..."
+}
+```
+
+Rebind is safe to call defensively after every sign-in:
+
+- If the device never used an anonymous session, the call is a no-op and returns `{"rebound": false}`.
+- If the same device and user have already been rebound, the call is also a no-op.
+- If the device was previously rebound to a different Clerk user, the call returns `409 Conflict`.
+
+<Warning>
+  Rebind requires an authenticated token. Calling it with an anonymous session token returns `401 "Rebind requires an authenticated user token; got anonymous session"`. Always sign the user in first, then call rebind with the authenticated token.
+</Warning>
+
+For the full parameter and error reference, see [`POST /auth/anonymous`](/api-reference/authentication) and [`POST /auth/rebind`](/api-reference/authentication) in the API reference.
+
+---
+
+## Recommended: call bootstrap after authenticating
+
+After getting a session token, call `GET /auth/bootstrap` as your first request. This endpoint returns your full profile, subscription details, and connected secret status in one call — saving you multiple round trips.
+
+```bash curl
+curl https://api.manticscore.com/auth/bootstrap \
+  -H "Authorization: Bearer <session_token>"
+```
+
+**Response:**
+
+```json
+{
+  "profile": {
+    "name": "Ada Lovelace",
+    "email": "ada@example.com",
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20,
+    "project_count": 5
+  },
+  "subscription": {
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20
+  },
+  "secrets": {
+    "has_github_pat": true,
+    "has_anthropic_key": false,
+    "has_openai_key": false
+  }
+}
+```
+
+The bootstrap endpoint also auto-creates your ManticScore profile on first access, so you don't need a separate account setup step.
+
+---
+
+## Session token TTL and refreshing
+
+<Note>
+  Session tokens expire after **30 minutes**. Plan to refresh proactively rather than waiting for a `401`.
+</Note>
+
+Session tokens use a sliding TTL — connecting to a streaming endpoint extends the TTL automatically. For non-streaming usage, re-authenticate by calling `POST /auth/session` again with your Clerk JWT before the token expires:
+
+```bash curl
+# Re-authenticate with your Clerk JWT to get a fresh session token
+curl -X POST https://api.manticscore.com/auth/session \
+  -H "Authorization: Bearer <your_clerk_jwt>"
+```
+
+```python python
+import time
+import httpx
+
+CLERK_JWT = "<your_clerk_jwt>"
+BASE_URL = "https://api.manticscore.com"
+
+
+class ManticScoreClient:
+    def __init__(self):
+        self._token = None
+        self._expires_at = 0
+
+    def _get_token(self) -> str:
+        # Refresh 60 seconds before expiry
+        if time.time() >= self._expires_at - 60:
+            resp = httpx.post(
+                f"{BASE_URL}/auth/session",
+                headers={"Authorization": f"Bearer {CLERK_JWT}"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            self._token = data["token"]
+            self._expires_at = time.time() + data["expires_in"]
+        return self._token
+
+    def get(self, path: str, **kwargs):
+        headers = kwargs.pop("headers", {})
+        headers["Authorization"] = f"Bearer {self._get_token()}"
+        return httpx.get(f"{BASE_URL}{path}", headers=headers, **kwargs)
+
+    def post(self, path: str, **kwargs):
+        headers = kwargs.pop("headers", {})
+        headers["Authorization"] = f"Bearer {self._get_token()}"
+        return httpx.post(f"{BASE_URL}{path}", headers=headers, **kwargs)
+```
+
+---
+
+## Logging out
+
+To revoke the current session token, send a `DELETE /auth/session` request:
+
+```bash curl
+curl -X DELETE https://api.manticscore.com/auth/session \
+  -H "Authorization: Bearer <session_token>"
+```
+
+**Response:**
+
+```json
+{
+  "success": true
+}
+```
+
+The token is immediately invalidated. Any subsequent requests using that token will receive a `401`.
+
+---
+
+## Error responses
+
+All auth errors return `4xx` JSON responses with a `detail` field.
+
+| Status | `detail` | Cause |
+|---|---|---|
+| `401` | `"Missing Bearer token"` | `Authorization` header is absent |
+| `401` | `"Token expired"` | Session token TTL has elapsed |
+| `401` | `"Invalid token: ..."` | Token is malformed or unrecognized |
+| `401` | `"Invalid authorized party"` | JWT `azp` claim doesn't match the expected value |
+| `401` | `"Rebind requires an authenticated user token; got anonymous session"` | `POST /auth/rebind` was called with an anonymous session token — sign in first, then retry with the authenticated token |
+| `409` | `"device <id> already rebound to a different user"` | `POST /auth/rebind` — the device has already been rebound to a different Clerk user |
+| `422` | `"device_id required"` | `POST /auth/anonymous` or `POST /auth/rebind` was called without `device_id` in the body |
+| `503` | `"JWKS not loaded"` | Clerk JWKS endpoint is temporarily unreachable |
+
+**Example error response:**
+
+```json
+{
+  "detail": "Token expired"
+}
+```
+
+Handle `401` responses by re-authenticating with your Clerk JWT and retrying the original request. A `503` is transient — retry with backoff.
+
+```python python
+import httpx
+
+def request_with_auth_retry(client: ManticScoreClient, path: str):
+    resp = client.get(path)
+    if resp.status_code == 401:
+        # Force a token refresh on next call
+        client._expires_at = 0
+        resp = client.get(path)
+    resp.raise_for_status()
+    return resp.json()
+```
+
+---
+
+## Summary
+
+<Steps>
+  <Step title="Get a Clerk JWT">
+    Retrieve your JWT from the Clerk dashboard or your Clerk client SDK.
+  </Step>
+  <Step title="Exchange for a session token">
+    `POST /auth/session` with your Clerk JWT in the `Authorization` header. Save the returned `token`.
+  </Step>
+  <Step title="Call bootstrap">
+    `GET /auth/bootstrap` to load your profile and verify the token works end-to-end.
+  </Step>
+  <Step title="Make requests">
+    Pass `Authorization: Bearer <session_token>` on every subsequent API call.
+  </Step>
+  <Step title="Refresh before expiry">
+    Session tokens last 30 minutes. Re-authenticate with your Clerk JWT before they expire.
+  </Step>
+  <Step title="Logout when done">
+    `DELETE /auth/session` to revoke the token immediately.
+  </Step>
+</Steps>

@@ -1,0 +1,261 @@
+---
+title: "Linear and Jira: ship build plans as tracked issues"
+description: "Connect Linear or Jira to turn ManticScore build nodes into tracked issues automatically — one node at a time or the entire build plan in a single bulk export."
+---
+
+ManticScore integrates with both Linear and Jira so you can move from a build plan to a tracked backlog without manual copy-paste. You can create a ticket from a single build node, or bulk-export an entire build graph at once. ManticScore auto-maps node effort and priority to the issue fields your team already uses. Connect whichever tracker your team prefers — the API shape is nearly identical for both.
+
+<Tabs>
+  <Tab title="Linear">
+
+## Connecting Linear
+
+Connect Linear through the standard Composio OAuth flow:
+
+```bash
+curl -X POST https://api.manticscore.com/profile/integrations/linear/connect \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "url": "https://composio.dev/oauth/linear/...",
+  "toolkit": "linear"
+}
+```
+
+Open the URL in a browser, authorize ManticScore, and Linear auto-discovers your teams and projects.
+
+## Configuring defaults
+
+Set which team and project ManticScore creates issues in by default. You only need to do this once — ManticScore uses these values for every export unless you override them per request.
+
+```bash
+curl -X PATCH https://api.manticscore.com/profile/integrations/linear/defaults \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "team_id": "TEAM_abc123",
+    "team_name": "Engineering",
+    "project_id": "PROJ_xyz789",
+    "default_priority": 2,
+    "default_labels": ["manticscore", "backend"],
+    "assignee_id": "USER_abc"
+  }'
+```
+
+| Field | Description |
+|---|---|
+| `team_id` | Linear team to create issues in |
+| `project_id` | Linear project to attach issues to |
+| `default_priority` | 0 = No priority, 1 = Urgent, 2 = High, 3 = Medium, 4 = Low |
+| `default_labels` | Labels applied to every exported issue |
+| `assignee_id` | Default assignee for every issue |
+
+## List your Linear teams
+
+```bash
+curl https://api.manticscore.com/integrations/linear/teams \
+  -H "Authorization: Bearer <token>"
+```
+
+## Create an issue directly
+
+```bash
+curl -X POST https://api.manticscore.com/integrations/linear/issues \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Implement rate limiting middleware",
+    "team_id": "TEAM_abc123",
+    "description": "Add token bucket rate limiting to all public API endpoints.",
+    "priority": 2
+  }'
+```
+
+## Create a ticket from a build node
+
+ManticScore maps each node's `effort` and `risk` fields to Linear issue priority automatically.
+
+```bash
+curl -X POST https://api.manticscore.com/build-nodes/node-uuid/ticket \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "linear",
+    "team_id": "TEAM_abc123"
+  }'
+```
+
+```json
+{
+  "node_id": "node-uuid",
+  "target": "linear",
+  "issue": {
+    "id": "LIN-42",
+    "title": "Add rate limiting middleware",
+    "url": "https://linear.app/acme/issue/LIN-42"
+  }
+}
+```
+
+## Bulk-ship a build plan
+
+Export every node from a build graph to Linear in one call. Set `top_level_only: true` to export only root-level nodes.
+
+```bash
+curl -X POST https://api.manticscore.com/build-graphs/graph-uuid/ship \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "linear",
+    "top_level_only": false
+  }'
+```
+
+```json
+{
+  "target": "linear",
+  "total": 12,
+  "created": 12,
+  "issues": [
+    {
+      "node_id": "node-uuid",
+      "node": "Add rate limiting middleware",
+      "effort": "medium",
+      "priority": 2
+    }
+  ]
+}
+```
+
+  </Tab>
+  <Tab title="Jira">
+
+## Connecting Jira
+
+Connect Jira through the standard Composio OAuth flow:
+
+```bash
+curl -X POST https://api.manticscore.com/profile/integrations/jira/connect \
+  -H "Authorization: Bearer <token>"
+```
+
+```json
+{
+  "url": "https://composio.dev/oauth/jira/...",
+  "toolkit": "jira"
+}
+```
+
+Open the URL in a browser, authorize ManticScore, and Jira auto-discovers your projects.
+
+## Configuring defaults
+
+```bash
+curl -X PATCH https://api.manticscore.com/profile/integrations/jira/defaults \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_key": "ENG",
+    "project_name": "Engineering",
+    "default_issue_type": "Task",
+    "default_priority": "Medium",
+    "component_id": "backend"
+  }'
+```
+
+| Field | Description |
+|---|---|
+| `project_key` | Jira project key (e.g. `ENG`) |
+| `default_issue_type` | Issue type to use: `Task`, `Story`, `Bug`, etc. |
+| `default_priority` | Priority string: `Highest`, `High`, `Medium`, `Low`, `Lowest` |
+| `component_id` | Jira component to tag issues with |
+
+## List your Jira projects
+
+```bash
+curl https://api.manticscore.com/integrations/jira/projects \
+  -H "Authorization: Bearer <token>"
+```
+
+## Create an issue directly
+
+```bash
+curl -X POST https://api.manticscore.com/integrations/jira/issues \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_key": "ENG",
+    "summary": "Implement rate limiting middleware",
+    "issue_type": "Task",
+    "description": "Add token bucket rate limiting to all public API endpoints."
+  }'
+```
+
+## Create a ticket from a build node
+
+```bash
+curl -X POST https://api.manticscore.com/build-nodes/node-uuid/ticket \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "jira",
+    "project_key": "ENG"
+  }'
+```
+
+```json
+{
+  "node_id": "node-uuid",
+  "target": "jira",
+  "issue": {
+    "key": "ENG-42",
+    "summary": "Add rate limiting middleware",
+    "url": "https://acme.atlassian.net/browse/ENG-42"
+  }
+}
+```
+
+## Bulk-ship a build plan
+
+```bash
+curl -X POST https://api.manticscore.com/build-graphs/graph-uuid/ship \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "jira",
+    "project_key": "ENG"
+  }'
+```
+
+```json
+{
+  "target": "jira",
+  "total": 12,
+  "created": 12,
+  "issues": [
+    {
+      "node_id": "node-uuid",
+      "node": "Add rate limiting middleware",
+      "effort": "medium",
+      "priority": "Medium"
+    }
+  ]
+}
+```
+
+  </Tab>
+</Tabs>
+
+## Defaults and overrides
+
+When you call any ship or ticket endpoint, ManticScore uses your saved defaults unless you pass overrides explicitly. This means you can call `POST /build-graphs/{id}/ship` with just `{"target": "linear"}` and ManticScore fills in the team, project, labels, and assignee from your configured defaults.
+
+<Tip>
+If you manage multiple Linear teams or Jira projects, you can override `team_id` or `project_key` on any individual request. Your saved defaults stay unchanged.
+</Tip>
+
+<Note>
+Both `/build-nodes/{node_id}/ticket` and `/build-graphs/{graph_id}/ship` return `400` if the target integration is not connected or if no default team/project has been configured. Connect the integration and run `POST /integrations/{toolkit}/discover` to set initial defaults, or configure them manually via `PATCH /profile/integrations/{toolkit}/defaults`.
+</Note>

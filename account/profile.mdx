@@ -1,0 +1,248 @@
+---
+title: "Manage your profile, name, email, and agent settings"
+description: "Read and update your ManticScore profile, configure AI agent autonomy preferences, and link your phone number for iMessage App Clip delivery."
+---
+
+Your profile is the central record for your account — it holds your name, email, plan, credit usage, and the configuration that controls how the ManticScore AI agent behaves on your behalf.
+
+## Read your profile
+
+```bash
+GET /profile
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "name": "Jordan Lee",
+  "email": "jordan@example.com",
+  "plan": "free",
+  "credits_used": 3,
+  "credits_total": 20,
+  "project_count": 5,
+  "usage": {
+    "tokens_in": 0,
+    "tokens_out": 0,
+    "api_calls": 0,
+    "research_count": 0
+  },
+  "agent_config": {}
+}
+```
+
+The profile is auto-created on first access — you don't need to call a separate registration endpoint.
+
+## Update name or email
+
+```bash
+PUT /profile
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"name": "Jordan Lee", "email": "jordan@example.com"}
+```
+
+Pass `null` for either field to leave it unchanged. The response has the same shape as `GET /profile`.
+
+## Configure agent autonomy
+
+The agent autonomy setting controls how much the ManticScore AI acts on your behalf without stopping to ask for confirmation.
+
+```bash
+PATCH /profile/agent-config
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "autonomy_level": "suggest",
+  "auto_actions": ["slack.post", "notion.export"]
+}
+```
+
+**Response:** the full updated `agent_config` object.
+
+<AccordionGroup>
+  <Accordion title="autonomy_level options">
+    | Level | Behavior |
+    |-------|----------|
+    | `suggest` | Agent proposes actions; you tap to confirm each one |
+    | `confirm` | Agent requires explicit approval before acting |
+    | `auto` | Agent acts immediately without asking |
+  </Accordion>
+  <Accordion title="auto_actions">
+    You can allow specific actions to run automatically even when `autonomy_level` is `suggest` or `confirm`. Pass an array of action strings:
+
+    - `slack.post`
+    - `notion.export`
+    - `linear.create_issues`
+    - `jira.create_issues`
+    - `gmail.send`
+    - `github.create_pr`
+  </Accordion>
+</AccordionGroup>
+
+## Link a phone number
+
+Linking your phone number enables App Clip delivery over iMessage. When you link a number, ManticScore sends you a welcome App Clip to confirm the connection.
+
+```bash
+PATCH /profile/phone
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"phone": "+12125551234"}
+```
+
+The API accepts US 10-digit, 11-digit, or E.164 format and normalizes to E.164 in the response.
+
+```json
+{"phone": "+12125551234", "verified": true}
+```
+
+`verified: true` means the welcome iMessage was successfully enqueued. Delivery typically takes 1–3 seconds when the system is idle.
+
+**Error responses:**
+
+| Status | Meaning |
+|--------|---------|
+| `422` | Invalid phone number format |
+| `409` | Number is already linked to another account |
+
+<Note>
+  Each iMessage ManticScore sends contains exactly one App Clip URL. ManticScore does not send arbitrary text.
+</Note>
+
+## Manage MCP bearer tokens
+
+If you connect to the [MCP server](/api-reference/mcp) from Claude Code, Claude Desktop, or any other agent that speaks the MCP HTTP transport, you authenticate with a per-user bearer token minted from your profile. Each token has the form `mcp_<48 url-safe chars>`. The plaintext is returned exactly once at creation; only the SHA-256 hash is stored server-side. If you lose a token, revoke it and mint a new one.
+
+### Create a token
+
+```bash
+POST /profile/mcp/tokens
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{"label": "Claude Code on laptop"}
+```
+
+```json
+{
+  "id": "8c2e1a44-3f02-4b1d-bd5e-9d4a3b2c8101",
+  "label": "Claude Code on laptop",
+  "token": "mcp_8X2pQk...redacted...",
+  "created_at": "2026-04-29T08:30:00.000000+00:00"
+}
+```
+
+<ParamField body="label" type="string">
+  Optional human-readable label to help you remember where the token is used (e.g. `Claude Code on laptop`, `agent-server`). Stored but not validated.
+</ParamField>
+
+<ResponseField name="id" type="string">
+  UUID of the token row. Use this with `DELETE /profile/mcp/tokens/{token_id}` to revoke.
+</ResponseField>
+
+<ResponseField name="label" type="string | null">
+  Label as supplied at creation, if any.
+</ResponseField>
+
+<ResponseField name="token" type="string">
+  The plaintext bearer token. **Returned exactly once** — store it immediately. ManticScore cannot recover it.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  Insert timestamp as an ISO 8601 string in UTC.
+</ResponseField>
+
+### List active tokens
+
+```bash
+GET /profile/mcp/tokens
+Authorization: Bearer <token>
+```
+
+```json
+[
+  {
+    "id": "8c2e1a44-3f02-4b1d-bd5e-9d4a3b2c8101",
+    "label": "Claude Code on laptop",
+    "last_used_at": "2026-04-29T09:12:30.000000+00:00",
+    "created_at": "2026-04-29T08:30:00.000000+00:00"
+  }
+]
+```
+
+Returns only tokens where `revoked_at IS NULL`, newest-first. Hashes and plaintext tokens are never returned — only metadata.
+
+<ResponseField name="id" type="string">
+  UUID of the token row.
+</ResponseField>
+
+<ResponseField name="label" type="string | null">
+  Label as supplied at creation, if any.
+</ResponseField>
+
+<ResponseField name="last_used_at" type="string | null">
+  Last time the token was used to authenticate an MCP request, as an ISO 8601 string in UTC. `null` if the token has never been used.
+</ResponseField>
+
+<ResponseField name="created_at" type="string">
+  Insert timestamp as an ISO 8601 string in UTC.
+</ResponseField>
+
+### Revoke a token
+
+```bash
+DELETE /profile/mcp/tokens/{token_id}
+Authorization: Bearer <token>
+```
+
+```json
+{"ok": true, "id": "8c2e1a44-3f02-4b1d-bd5e-9d4a3b2c8101"}
+```
+
+Idempotent — already-revoked tokens return `ok`. Returns `404` if the token doesn't exist or belongs to another account.
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Token revoked (or was already revoked). |
+| `404` | Token not found, or not owned by the authenticated user. |
+
+<Warning>
+  Revocation takes effect immediately for new requests. Any in-flight MCP request that already passed the bearer check will continue to completion.
+</Warning>
+
+## Bootstrap call
+
+On app launch, you can hydrate your entire initial state with a single request instead of calling `/profile`, `/secrets`, and your subscription endpoint separately.
+
+```bash
+GET /auth/bootstrap
+Authorization: Bearer <token>
+```
+
+```json
+{
+  "profile": {
+    "name": "Jordan Lee",
+    "email": "jordan@example.com",
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20,
+    "project_count": 5
+  },
+  "subscription": {
+    "plan": "free",
+    "credits_used": 3,
+    "credits_total": 20
+  },
+  "secrets": {
+    "has_github_pat": true,
+    "has_anthropic_key": false,
+    "has_openai_key": false
+  }
+}
+```
+
+This is the recommended first call after authentication. It also triggers the daily credit reset for free-tier accounts if more than 24 hours have elapsed since the last reset.

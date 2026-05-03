@@ -1,0 +1,227 @@
+---
+title: "Deep-dive how competitors implement specific features"
+description: "Analyze how competitors implement features across a four-stage AI pipeline. Get a prioritized build blueprint with open-source options and MVP day estimates."
+---
+
+Feature Research takes the features identified in your market research and examines them in depth. Rather than giving you a surface-level list of what competitors offer, it goes a level deeper: how do they implement each feature, what patterns are common, what technical approaches do they use, where are the edge cases, and what open-source options exist. The pipeline finishes with a prioritized build blueprint and an MVP day estimate, giving you a direct path from research to planning.
+
+## How the pipeline works
+
+Feature Research runs four stages sequentially:
+
+| Stage | What happens |
+|---|---|
+| **scope** | The AI determines which competitors to analyze for each feature |
+| **gather** | Pages, docs, and product content are fetched for each competitor |
+| **analyze** | Each feature–competitor pair is analyzed in depth |
+| **synthesize** | A cross-competitor blueprint and build order are generated |
+
+## Starting a feature research job
+
+<Steps>
+  <Step title="Identify features to analyze">
+    You need a list of features — either from a completed market research job or entered manually. Each feature needs an `id`, a `name`, and a `source`.
+  </Step>
+
+  <Step title="Submit the job">
+    Send a `POST /feature-research` request. The endpoint returns immediately with a job ID.
+
+    <ParamField body="features" type="array" required>
+      List of features to analyze. Each item must include `id` (string), `name` (string), and `source` (string, e.g. `"research"`).
+    </ParamField>
+
+    <ParamField body="idea" type="string" required>
+      Your product idea, up to 5,000 characters. Provides context for competitive scoping.
+    </ParamField>
+
+    <ParamField body="project_id" type="string">
+      UUID of a project to attach results to. Pass `null` to leave unattached.
+    </ParamField>
+
+    <ParamField body="research_id" type="string">
+      UUID of a completed market research job. When provided, the pipeline uses that research as additional context during the scope stage.
+    </ParamField>
+
+    <CodeGroup>
+
+    ```bash curl
+    curl --request POST \
+      --url https://api.manticscore.com/feature-research \
+      --header 'Authorization: Bearer <token>' \
+      --header 'Content-Type: application/json' \
+      --data '{
+        "features": [
+          {"id": "feat_001", "name": "Automated invoice generation", "source": "research"},
+          {"id": "feat_002", "name": "Time tracking with project tagging", "source": "research"}
+        ],
+        "idea": "A mobile app that helps freelancers track time and automatically generate invoices",
+        "project_id": "proj_uuid_here",
+        "research_id": "research_uuid_here"
+      }'
+    ```
+
+    ```python python
+    import requests
+
+    response = requests.post(
+        "https://api.manticscore.com/feature-research",
+        headers={"Authorization": "Bearer <token>"},
+        json={
+            "features": [
+                {"id": "feat_001", "name": "Automated invoice generation", "source": "research"},
+                {"id": "feat_002", "name": "Time tracking with project tagging", "source": "research"},
+            ],
+            "idea": "A mobile app that helps freelancers track time and automatically generate invoices",
+            "project_id": "proj_uuid_here",
+            "research_id": "research_uuid_here",
+        },
+    )
+    print(response.json())
+    ```
+
+    </CodeGroup>
+
+    **Response 202:**
+
+    ```json
+    {
+      "job_id": "b2c3d4e5-...",
+      "status": "queued"
+    }
+    ```
+  </Step>
+
+  <Step title="Stream or poll for results">
+    Stream progress via the events endpoint, or poll the status endpoint until `status` is `completed`.
+  </Step>
+</Steps>
+
+## Streaming progress events
+
+```bash curl
+curl --request GET \
+  --url 'https://api.manticscore.com/feature-research/b2c3d4e5-.../events?cursor=0' \
+  --header 'Authorization: Bearer <token>'
+```
+
+The event stream follows the [NDJSON v1 protocol](/streaming/ndjson-protocol). Key events:
+
+| Event | Description |
+|---|---|
+| `stage` | A pipeline stage started, completed, or failed |
+| `progress` | Free-text status message within a stage |
+| `feature_analyzed` | Emitted each time one feature finishes analysis |
+| `result` | Full results payload, emitted on completion |
+| `error` | Non-retryable failure |
+| `done` | Stream closed |
+
+<Tip>
+If you reconnect after a disconnect, pass `cursor=<last_seq>` to replay missed events from where you left off. If the job is already complete and you connect with `cursor=0`, the full result is replayed as a single `result` event.
+</Tip>
+
+## Fetching completed results
+
+Once the job status is `completed`, fetch the full analysis:
+
+<CodeGroup>
+
+```bash curl
+curl --request GET \
+  --url https://api.manticscore.com/feature-research/b2c3d4e5-.../results \
+  --header 'Authorization: Bearer <token>'
+```
+
+```python python
+import requests
+
+response = requests.get(
+    "https://api.manticscore.com/feature-research/b2c3d4e5-.../results",
+    headers={"Authorization": "Bearer <token>"},
+)
+print(response.json())
+```
+
+</CodeGroup>
+
+### Result shape
+
+<ResponseField name="analyses" type="array">
+  One entry per feature. Each entry contains:
+
+  <Expandable title="properties">
+    <ResponseField name="feature_id" type="string">
+      The feature ID you submitted.
+    </ResponseField>
+    <ResponseField name="implementations" type="array">
+      How each competitor implements this feature, including UX patterns and notable details.
+    </ResponseField>
+    <ResponseField name="common_patterns" type="array">
+      Patterns that appear across multiple competitors — your baseline table stakes.
+    </ResponseField>
+    <ResponseField name="technical_approaches" type="array">
+      Technical strategies used, from simple heuristics to ML-based approaches.
+    </ResponseField>
+    <ResponseField name="edge_cases" type="array">
+      Known edge cases and how different products handle them.
+    </ResponseField>
+    <ResponseField name="oss_landscape" type="array">
+      Open-source libraries and tools relevant to building this feature.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="blueprint" type="object">
+  A cross-feature build plan synthesized from all analyses.
+
+  <Expandable title="properties">
+    <ResponseField name="recommendations" type="array">
+      Prioritized feature recommendations with rationale.
+    </ResponseField>
+    <ResponseField name="build_order" type="array">
+      Suggested implementation sequence based on dependencies and impact.
+    </ResponseField>
+    <ResponseField name="total_mvp_days" type="number">
+      Estimated total days to reach a shippable MVP across all analyzed features.
+    </ResponseField>
+    <ResponseField name="strategic_summary" type="string">
+      A concise narrative summary of the overall build strategy.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="quality" type="object">
+  <Expandable title="properties">
+    <ResponseField name="overall_score" type="number">
+      Overall quality score for this analysis, from 0 to 10.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Auto-chaining from market research
+
+You don't need to start feature research manually. When you run `POST /research` with `mode=feature`, ManticScore automatically chains into feature deep research on the top 5 features once market research completes.
+
+```bash curl
+curl --request POST \
+  --url https://api.manticscore.com/research \
+  --header 'Authorization: Bearer <token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "idea": "A mobile app that helps freelancers track time and automatically generate invoices",
+    "mode": "feature"
+  }'
+```
+
+The response includes `"chain_feature_research": true`, and you'll receive a push notification when the feature analysis completes.
+
+## Limits and credits
+
+| | Value |
+|---|---|
+| Rate limit | 5 requests / minute |
+| Credit cost | 3 credits per job |
+| Max idea length | 5,000 characters |
+
+<Warning>
+`GET /feature-research/{job_id}/results` returns a `409` if the job has not yet completed. Check the status endpoint or wait for the `result` stream event before fetching results.
+</Warning>
