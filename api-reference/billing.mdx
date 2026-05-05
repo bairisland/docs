@@ -1,0 +1,192 @@
+---
+title: "Billing, usage, and subscription state"
+description: "Read live credit balances and subscription state from a single endpoint, and accept RevenueCat subscription lifecycle events via signed webhook."
+---
+
+The billing endpoints expose the current user's credit balance and subscription state, and accept lifecycle events from RevenueCat. iOS reads `GET /v1/usage` on every app launch and after every paywall presentation — it is the single source of truth for "what does this user have access to right now".
+
+## Get current usage
+
+Returns credits and subscription state for the authenticated user.
+
+Rate limit: **120 requests per minute**.
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/v1/usage \
+  -H "Authorization: Bearer <session_token>"
+```
+
+```python Python
+import httpx
+
+resp = httpx.get(
+    "https://api.manticscore.com/v1/usage",
+    headers={"Authorization": f"Bearer {session_token}"},
+)
+data = resp.json()
+print(f"Plan: {data['plan']}")
+print(f"Credits: {data['credits']['remaining']} remaining")
+```
+
+```swift Swift
+let url = URL(string: "https://api.manticscore.com/v1/usage")!
+var request = URLRequest(url: url)
+request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
+let (data, _) = try await URLSession.shared.data(for: request)
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "plan": "free",
+  "credits": {
+    "used": 6,
+    "total": 20,
+    "remaining": 14,
+    "resets_at": "2026-05-06T08:30:00+00:00",
+    "weights": {
+      "research": 3,
+      "feature_research": 3,
+      "forge": 2,
+      "build": 1,
+      "chat": 1,
+      "judge": 1
+    }
+  },
+  "subscription": {
+    "active": false,
+    "status": "none",
+    "source": null,
+    "tier": null,
+    "product_id": null,
+    "started_at": null,
+    "expires_at": null,
+    "auto_renew": null
+  }
+}
+```
+
+<ResponseField name="plan" type="string" required>
+  One of `free`, `pro`, `early_access`.
+</ResponseField>
+
+<ResponseField name="credits" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="used" type="number" required>
+      Credits consumed in the current window.
+    </ResponseField>
+    <ResponseField name="total" type="number" required>
+      Total credits available in the current window.
+    </ResponseField>
+    <ResponseField name="remaining" type="number" required>
+      Convenience field: `max(total - used, 0)`.
+    </ResponseField>
+    <ResponseField name="resets_at" type="string">
+      ISO 8601 timestamp of the next free-tier reset, or `null` for paid plans (lifetime credits, no reset).
+    </ResponseField>
+    <ResponseField name="weights" type="object" required>
+      Per-action credit cost map. Keys: `research`, `feature_research`, `forge`, `build`, `chat`, `judge`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="subscription" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="active" type="boolean" required>
+      Whether the user currently has access to paid features. Computed live — accounts for grace periods and billing retry.
+    </ResponseField>
+    <ResponseField name="status" type="string" required>
+      One of `none`, `active`, `in_trial`, `in_grace_period`, `in_billing_retry`, `expired`, `revoked`, `paused`.
+    </ResponseField>
+    <ResponseField name="source" type="string">
+      Billing gateway. One of `apple`, `revenuecat`, `stripe`, or `null`.
+    </ResponseField>
+    <ResponseField name="tier" type="string">
+      Tier label. One of `plus`, `pro`, or `null`.
+    </ResponseField>
+    <ResponseField name="product_id" type="string">
+      Gateway product identifier (e.g. `com.bairisland.manticscore.pro.monthly`), or `null`.
+    </ResponseField>
+    <ResponseField name="started_at" type="string">
+      ISO 8601 timestamp of subscription start, or `null`.
+    </ResponseField>
+    <ResponseField name="expires_at" type="string">
+      ISO 8601 timestamp of subscription expiry, or `null`.
+    </ResponseField>
+    <ResponseField name="auto_renew" type="boolean">
+      Whether auto-renew is enabled, or `null` if unknown.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Note>
+  New users with no profile row receive a default response: `plan: "free"`, 20 free credits, and `subscription.active: false`. The profile row is created lazily on first call to `GET /profile`.
+</Note>
+
+## RevenueCat webhook
+
+Endpoint that RevenueCat calls to deliver subscription lifecycle events. You do not call this endpoint directly — configure it once in the RevenueCat dashboard under **Project → Integrations → Webhook**.
+
+```
+POST /api/v1/billing/rc-webhook
+```
+
+Rate limit: **600 requests per minute**.
+
+### Authentication
+
+Two layers, both required when configured:
+
+1. **Bearer token** (required). The value of the `Authorization` header is compared in constant time to the secret configured in the RevenueCat dashboard.
+
+   ```
+   Authorization: Bearer <revenuecat_webhook_secret>
+   ```
+
+2. **HMAC-SHA256 body signature** (optional, defense-in-depth). When `revenuecat_signing_secret` is configured server-side, requests must include a hex digest of the raw body in the `X-RevenueCat-Signature` header. The verification path is currently dormant because RevenueCat removed the signing-secret field from current dashboards; leave the secret unset to skip this check.
+
+If the bearer is invalid the endpoint returns `401`. If the JSON body is malformed it returns `400`. All other outcomes — including event-handler exceptions — return `200` so RevenueCat does not enter retry backoff for issues that require a code fix. The event row is always written to the audit table first, so failed events can be replayed from there.
+
+### Handled event types
+
+| RevenueCat event | Subscription status |
+|---|---|
+| `INITIAL_PURCHASE` | `active` |
+| `RENEWAL` | `active` |
+| `NON_RENEWING_PURCHASE` | `active` |
+| `UNCANCELLATION` | `active` |
+| `PRODUCT_CHANGE` | `active` |
+| `CANCELLATION` | `active` (auto-renew off; entitled until expiry) |
+| `EXPIRATION` | `expired` |
+| `BILLING_ISSUE` | `in_billing_retry` |
+| `SUBSCRIPTION_PAUSED` | `paused` |
+| `SUBSCRIBER_ALIAS` | audit-only |
+| `TRANSFER` | audit-only |
+| `TEST` | audit-only |
+
+After processing the event, the server fetches the canonical subscription list from `GET /v2/projects/{project_id}/customers/{customer_id}/subscriptions` and reconciles the user's stored state against RevenueCat's authoritative view. Reconciliation is best-effort — a transient failure does not fail the webhook.
+
+Each successful entitlement state flip also fires a `usage.changed` silent control envelope over the realtime gateway so the user's iOS client refreshes `/v1/usage` immediately without waiting for the next foreground poll.
+
+```json 200 response (test event)
+{
+  "ok": true,
+  "audit_only": true,
+  "type": "TEST"
+}
+```
+
+```json 200 response (deferred after handler exception)
+{
+  "ok": true,
+  "deferred": true,
+  "reason": "internal_error"
+}
+```
+
+<Tip>
+  Every webhook event is appended to an audit table before any state mutation. If the handler is updated later, historical events can be re-processed from the audit trail without asking RevenueCat to replay.
+</Tip>

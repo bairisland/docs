@@ -14,6 +14,9 @@ ManticScore uses a credit system to meter AI-powered operations. Each time you r
 | Forge (agentic coding) | 2 |
 | Build graph | 1 |
 | Chat message | 1 |
+| Retrieval judge | 1 |
+
+The same costs are also published in machine-readable form under `credits.weights` on `GET /v1/usage`, so clients can render dynamic cost previews without hard-coding the table.
 
 ## Free tier vs. paid plans
 
@@ -27,9 +30,40 @@ ManticScore uses a credit system to meter AI-powered operations. Each time you r
 
 ## Checking your usage
 
-Your current credit usage is included in your profile and bootstrap responses.
+Your current credit usage is included in your profile and bootstrap responses, and is also available as a dedicated `GET /v1/usage` endpoint that returns credits, the per-action weight map, and live subscription state in one shot. See [Billing and usage](/api-reference/billing) for the full response schema.
 
 <Tabs>
+  <Tab title="Usage endpoint">
+    ```bash
+    GET /v1/usage
+    Authorization: Bearer <token>
+    ```
+
+    ```json
+    {
+      "plan": "free",
+      "credits": {
+        "used": 3,
+        "total": 20,
+        "remaining": 17,
+        "resets_at": "2026-05-06T08:30:00+00:00",
+        "weights": {
+          "research": 3,
+          "feature_research": 3,
+          "forge": 2,
+          "build": 1,
+          "chat": 1,
+          "judge": 1
+        }
+      },
+      "subscription": {
+        "active": false,
+        "status": "none",
+        ...
+      }
+    }
+    ```
+  </Tab>
   <Tab title="Profile endpoint">
     ```bash
     GET /profile
