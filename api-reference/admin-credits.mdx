@@ -89,7 +89,7 @@ Returns `404 rc_customer_not_found` if the user has no RevenueCat customer recor
 
 Adjust a user's credit balance with a required audit reason. Positive amounts grant; negative amounts deduct. Zero is rejected with `400 amount_must_be_nonzero`.
 
-Every call writes an auditable transaction on the RevenueCat dashboard and fires a `usage.changed` silent push so the user's iOS client refreshes its balance immediately without a foreground prompt.
+Every call writes an auditable transaction on the RevenueCat dashboard and fires a `usage.changed` silent control envelope over the realtime gateway so the user's iOS client refreshes its balance immediately without a foreground prompt. See [silent control envelopes](/api-reference/toasts#silent-control-envelopes) for the wire format.
 
 Rate limit: **30 requests per minute**.
 

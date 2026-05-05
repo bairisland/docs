@@ -146,7 +146,7 @@ Two layers, both required when configured:
    Authorization: Bearer <revenuecat_webhook_secret>
    ```
 
-2. **HMAC-SHA256 body signature** (optional, defense-in-depth). When `revenuecat_signing_secret` is configured server-side, requests must include a hex digest of the raw body in the `X-RevenueCat-Signature` header.
+2. **HMAC-SHA256 body signature** (optional, defense-in-depth). When `revenuecat_signing_secret` is configured server-side, requests must include a hex digest of the raw body in the `X-RevenueCat-Signature` header. The verification path is currently dormant because RevenueCat removed the signing-secret field from current dashboards; leave the secret unset to skip this check.
 
 If the bearer is invalid the endpoint returns `401`. If the JSON body is malformed it returns `400`. All other outcomes — including event-handler exceptions — return `200` so RevenueCat does not enter retry backoff for issues that require a code fix. The event row is always written to the audit table first, so failed events can be replayed from there.
 
@@ -168,6 +168,8 @@ If the bearer is invalid the endpoint returns `401`. If the JSON body is malform
 | `TEST` | audit-only |
 
 After processing the event, the server fetches the canonical subscription list from `GET /v2/projects/{project_id}/customers/{customer_id}/subscriptions` and reconciles the user's stored state against RevenueCat's authoritative view. Reconciliation is best-effort — a transient failure does not fail the webhook.
+
+Each successful entitlement state flip also fires a `usage.changed` silent control envelope over the realtime gateway so the user's iOS client refreshes `/v1/usage` immediately without waiting for the next foreground poll.
 
 ```json 200 response (test event)
 {

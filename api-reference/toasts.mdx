@@ -273,3 +273,12 @@ The client may send the following JSON messages:
 <Note>
   The realtime gateway is multi-worker safe. The publisher uses a Redis pub/sub channel keyed on the user, so any worker holding a foreground connection delivers the toast — APNS fallback is only used when no worker has a connection.
 </Note>
+
+### Silent control envelopes
+
+The same WebSocket also carries silent control messages with envelope `{"type": "control", "control": {"kind": "...", "params": {...}, "ts": "..."}}`. These are dispatched by the server when state the client cares about changes — for example:
+
+- `usage.changed` — fired when an entitlement transitions (RC webhook event, Apple server-to-server notification, or admin credit grant). The client refetches `GET /v1/usage`.
+- `flags.changed` — broadcast to all clients when CMS feature flags update.
+
+Control envelopes are not persisted and have no APNS fallback — every control kind has a corresponding REST endpoint the client can refetch from on reconnect. SDKs route these to a separate `onControl` handler so they do not surface as toast overlays.
