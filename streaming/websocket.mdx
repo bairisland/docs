@@ -127,9 +127,14 @@ Clients must ignore unknown event types so older builds remain forward-compatibl
 | `implement` | Implementation sessions | `completed`, `failed` |
 | `learning` | Background learning jobs | `completed`, `failed` |
 | `project` | Project-scoped fanout — research, build, brief, Forge, chat, and agent events for a single project | none (long-lived) |
+| `cards` | Per-user pipeline cards stream — every card emitted for the authenticated user, across all projects | none (long-lived) |
 
 <Note>
   The `project` channel does not have terminal statuses — it stays open as long as the project exists and fans in events from every per-domain channel that carries a `project_id`. Subscribe with `entity_id` set to the project UUID. Use `GET /projects/:id/home` to bootstrap the screen, then pass the returned `ws.last_event_seq` as `cursor` to resume without gaps. Per-domain channels remain available for clients that only need a single domain's events.
+</Note>
+
+<Note>
+  The `cards` channel is per-user, not per-entity. Subscribe with `entity_id` set to the authenticated user's Clerk id (not a UUID). The server does not replay events on subscribe — use [`GET /v1/cards`](/api-reference/pipeline#list-recent-cards) for cold-launch and reconnect catch-up, then subscribe to receive only live cards going forward. The `subscribed` confirmation always reports `replayed: 0` for this channel.
 </Note>
 
 ## Connection lifecycle

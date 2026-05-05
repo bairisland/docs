@@ -7,7 +7,7 @@ The billing endpoints expose the current user's credit balance and subscription 
 
 ## Get current usage
 
-Returns credits and subscription state for the authenticated user.
+Returns the current monthly billing period, the user's tier with caps, current consumption, and remaining allowance.
 
 Rate limit: **120 requests per minute**.
 
@@ -26,8 +26,8 @@ resp = httpx.get(
     headers={"Authorization": f"Bearer {session_token}"},
 )
 data = resp.json()
-print(f"Plan: {data['plan']}")
-print(f"Credits: {data['credits']['remaining']} remaining")
+print(f"Tier: {data['tier']['id']}")
+print(f"Credits: {data['remaining']['credits']} remaining")
 ```
 
 ```swift Swift
@@ -41,90 +41,113 @@ let (data, _) = try await URLSession.shared.data(for: request)
 
 ```json 200 response
 {
-  "plan": "free",
-  "credits": {
-    "used": 6,
-    "total": 20,
-    "remaining": 14,
-    "resets_at": "2026-05-06T08:30:00+00:00",
-    "weights": {
-      "research": 3,
-      "feature_research": 3,
-      "forge": 2,
-      "build": 1,
-      "chat": 1,
-      "judge": 1
+  "period": {
+    "key": "2026-05",
+    "resets_at": "2026-06-01T00:00:00+00:00"
+  },
+  "tier": {
+    "id": "free",
+    "product_id": null,
+    "caps": {
+      "questions": 50,
+      "tts_minutes": 5.0,
+      "credits": 20
     }
   },
-  "subscription": {
-    "active": false,
-    "status": "none",
-    "source": null,
-    "tier": null,
-    "product_id": null,
-    "started_at": null,
-    "expires_at": null,
-    "auto_renew": null
+  "used": {
+    "questions": 0,
+    "tts_seconds": 0.0,
+    "credits": 6
+  },
+  "remaining": {
+    "questions": 50,
+    "tts_minutes": 5.0,
+    "credits": 14
   }
 }
 ```
 
-<ResponseField name="plan" type="string" required>
-  One of `free`, `pro`, `early_access`.
-</ResponseField>
-
-<ResponseField name="credits" type="object" required>
+<ResponseField name="period" type="object" required>
   <Expandable title="properties">
-    <ResponseField name="used" type="number" required>
-      Credits consumed in the current window.
+    <ResponseField name="key" type="string" required>
+      Monthly period key in `YYYY-MM` format. Use to invalidate per-period local caches.
     </ResponseField>
-    <ResponseField name="total" type="number" required>
-      Total credits available in the current window.
-    </ResponseField>
-    <ResponseField name="remaining" type="number" required>
-      Convenience field: `max(total - used, 0)`.
-    </ResponseField>
-    <ResponseField name="resets_at" type="string">
-      ISO 8601 timestamp of the next free-tier reset, or `null` for paid plans (lifetime credits, no reset).
-    </ResponseField>
-    <ResponseField name="weights" type="object" required>
-      Per-action credit cost map. Keys: `research`, `feature_research`, `forge`, `build`, `chat`, `judge`.
+    <ResponseField name="resets_at" type="string" required>
+      ISO 8601 timestamp of the next month rollover (UTC). Drives "resets in N days" UX without polling.
     </ResponseField>
   </Expandable>
 </ResponseField>
 
-<ResponseField name="subscription" type="object" required>
+<ResponseField name="tier" type="object" required>
   <Expandable title="properties">
-    <ResponseField name="active" type="boolean" required>
-      Whether the user currently has access to paid features. Computed live — accounts for grace periods and billing retry.
-    </ResponseField>
-    <ResponseField name="status" type="string" required>
-      One of `none`, `active`, `in_trial`, `in_grace_period`, `in_billing_retry`, `expired`, `revoked`, `paused`.
-    </ResponseField>
-    <ResponseField name="source" type="string">
-      Billing gateway. One of `apple`, `revenuecat`, `stripe`, or `null`.
-    </ResponseField>
-    <ResponseField name="tier" type="string">
-      Tier label. One of `plus`, `pro`, or `null`.
+    <ResponseField name="id" type="string" required>
+      One of `free`, `explorer`, `plus`, `pro`, `early_access`. The active paid subscription tier wins; otherwise the user's plan field on the profile row is returned.
     </ResponseField>
     <ResponseField name="product_id" type="string">
-      Gateway product identifier (e.g. `com.bairisland.manticscore.pro.monthly`), or `null`.
+      Gateway product identifier (e.g. `com.bairisland.manticscore.pro.monthly`), or `null` for non-paid tiers.
     </ResponseField>
-    <ResponseField name="started_at" type="string">
-      ISO 8601 timestamp of subscription start, or `null`.
-    </ResponseField>
-    <ResponseField name="expires_at" type="string">
-      ISO 8601 timestamp of subscription expiry, or `null`.
-    </ResponseField>
-    <ResponseField name="auto_renew" type="boolean">
-      Whether auto-renew is enabled, or `null` if unknown.
+    <ResponseField name="caps" type="object" required>
+      Per-period allowance for the tier.
+      <Expandable title="properties">
+        <ResponseField name="questions" type="number" required>
+          Maximum questions per period.
+        </ResponseField>
+        <ResponseField name="tts_minutes" type="number" required>
+          Maximum text-to-speech minutes per period.
+        </ResponseField>
+        <ResponseField name="credits" type="number" required>
+          Maximum credits per period. A non-zero `credits_total` override on the user's profile (for example, an early-access lifetime grant) replaces the tier default.
+        </ResponseField>
+      </Expandable>
     </ResponseField>
   </Expandable>
 </ResponseField>
 
+<ResponseField name="used" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="questions" type="number" required>
+      Questions consumed in the current period. Returns `0` until the usage aggregator is wired.
+    </ResponseField>
+    <ResponseField name="tts_seconds" type="number" required>
+      Text-to-speech seconds consumed in the current period. Returns `0` until the usage aggregator is wired.
+    </ResponseField>
+    <ResponseField name="credits" type="number" required>
+      Credits consumed in the current period.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="remaining" type="object" required>
+  <Expandable title="properties">
+    <ResponseField name="questions" type="number" required>
+      `max(caps.questions - used.questions, 0)`.
+    </ResponseField>
+    <ResponseField name="tts_minutes" type="number" required>
+      `max(caps.tts_minutes - used.tts_seconds / 60, 0)`.
+    </ResponseField>
+    <ResponseField name="credits" type="number" required>
+      `max(caps.credits - used.credits, 0)`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Tier caps reference
+
+| Tier | Questions | TTS minutes | Credits |
+|---|---|---|---|
+| `free` | 50 | 5 | 20 |
+| `explorer` | 500 | 60 | 200 |
+| `plus` | 1500 | 180 | 300 |
+| `pro` | 2500 | 300 | 400 |
+| `early_access` | 100000 | 10000 | 100000 |
+
 <Note>
-  New users with no profile row receive a default response: `plan: "free"`, 20 free credits, and `subscription.active: false`. The profile row is created lazily on first call to `GET /profile`.
+  New users with no profile row receive a default response: `tier.id: "free"`, the free-tier caps, and zeroed counters. The profile row is created lazily on first call to `GET /profile`.
 </Note>
+
+<Info>
+  The previous `/v1/usage` shape (`plan`, `credits.{used,total,remaining,resets_at,weights}`, `subscription.{...}`) has been replaced. Subscription lifecycle data now lives on `GET /profile` and individual webhook events; tier identity and entitlement are derived from `tier.id` here. Per-action credit weights are documented under [Credits](/account/credits).
+</Info>
 
 ## RevenueCat webhook
 
