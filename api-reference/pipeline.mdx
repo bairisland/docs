@@ -129,6 +129,8 @@ Rate limit: **60 requests per minute**.
 GET /v1/cards
 ```
 
+Also exposed without the version prefix as `GET /cards` for clients that pin to the unversioned surface.
+
 <ParamField query="project_id" type="string">
   Filter to a single project.
 </ParamField>

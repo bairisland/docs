@@ -22,8 +22,12 @@ Rate limit: **30 requests per minute**.
 POST /v1/sessions/toast-bootstrap
 ```
 
-<ParamField body="device_id" type="string" required>
-  Stable per-device identifier.
+<ParamField body="clerk_jwt" type="string">
+  Optional. Informational mirror of the Clerk JWT — the `Authorization` header is the source of truth and is verified by the auth middleware. Provided so callers can document the binding explicitly; the body field is not re-verified.
+</ParamField>
+
+<ParamField body="device_id" type="string">
+  Stable per-device identifier. Optional — when omitted, the server synthesizes a deterministic id of the form `clerk:<user_id>` that is stable across reconnects. Pass an explicit value when two devices on the same Clerk account need to differentiate themselves (separate APNS tokens, distinct presence rows).
 </ParamField>
 
 <ParamField body="bundle_id" type="string" default="com.bairisland.manticscore">
@@ -31,7 +35,7 @@ POST /v1/sessions/toast-bootstrap
 </ParamField>
 
 <ParamField body="default_topics" type="array">
-  Topics to pre-subscribe at connect. Topics outside the user's own namespace are silently dropped — only `user:<user_id>:*` and arbitrary non-`user:*` topics are allowed.
+  Topics to pre-subscribe at connect. Topics outside the user's own namespace are silently dropped — only `user:<user_id>:*` and arbitrary non-`user:*` topics are allowed. When the array is empty, the server inserts `user:<user_id>` so first-connect subscriptions work without any client-side topic plumbing.
 </ParamField>
 
 ```json 200 response
@@ -70,7 +74,7 @@ POST /v1/devices/register-toast
 ```
 
 <ParamField body="device_id" type="string" required>
-  Stable per-device identifier; must match the one used in `toast-bootstrap`.
+  Stable per-device identifier; must match the one used in `toast-bootstrap`. If the bootstrap call omitted `device_id`, pass the synthesized `clerk:<user_id>` value here.
 </ParamField>
 
 <ParamField body="bundle_id" type="string" default="com.bairisland.manticscore">

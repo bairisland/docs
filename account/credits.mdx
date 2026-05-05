@@ -16,21 +16,29 @@ ManticScore uses a credit system to meter AI-powered operations. Each time you r
 | Chat message | 1 |
 | Retrieval judge | 1 |
 
-The same costs are also published in machine-readable form under `credits.weights` on `GET /v1/usage`, so clients can render dynamic cost previews without hard-coding the table.
+These weights are documented here as the canonical source. Clients should treat the table above as static — the previous `credits.weights` field on `GET /v1/usage` has been removed in favor of a fixed shape that matches the iOS `UsageDTO`.
 
-## Free tier vs. paid plans
+## Tier allowances
 
-**Free tier:** you receive 20 credits per day. Credits reset automatically every 24 hours based on your last reset timestamp.
+Each tier sets caps on questions, text-to-speech minutes, and credits per monthly period.
 
-**Pro and Early Access:** credits are lifetime — they don't reset daily and don't expire.
+| Tier | Questions | TTS minutes | Credits |
+|---|---|---|---|
+| Free | 50 | 5 | 20 |
+| Explorer | 500 | 60 | 200 |
+| Plus | 1500 | 180 | 300 |
+| Pro | 2500 | 300 | 400 |
+| Early Access | 100000 | 10000 | 100000 |
+
+Periods roll over at the first of each calendar month UTC. The exact rollover timestamp is returned as `period.resets_at` on `GET /v1/usage`.
 
 <Note>
-  The daily reset for free accounts runs automatically when you call `GET /auth/bootstrap` or `GET /profile` if more than 24 hours have passed since your last reset. No manual action is required.
+  An explicit non-zero `credits_total` on the user's profile (for example, an early-access lifetime grant) overrides the tier's `credits` cap. Question and TTS caps always come from the tier table.
 </Note>
 
 ## Checking your usage
 
-Your current credit usage is included in your profile and bootstrap responses, and is also available as a dedicated `GET /v1/usage` endpoint that returns credits, the per-action weight map, and live subscription state in one shot. See [Billing and usage](/api-reference/billing) for the full response schema.
+Your current credit usage is included in your profile and bootstrap responses, and is also available as a dedicated `GET /v1/usage` endpoint that returns the current period, tier with caps, used counters, and remaining allowance in one shot. See [Billing and usage](/api-reference/billing) for the full response schema.
 
 <Tabs>
   <Tab title="Usage endpoint">
@@ -41,26 +49,17 @@ Your current credit usage is included in your profile and bootstrap responses, a
 
     ```json
     {
-      "plan": "free",
-      "credits": {
-        "used": 3,
-        "total": 20,
-        "remaining": 17,
-        "resets_at": "2026-05-06T08:30:00+00:00",
-        "weights": {
-          "research": 3,
-          "feature_research": 3,
-          "forge": 2,
-          "build": 1,
-          "chat": 1,
-          "judge": 1
-        }
+      "period": {
+        "key": "2026-05",
+        "resets_at": "2026-06-01T00:00:00+00:00"
       },
-      "subscription": {
-        "active": false,
-        "status": "none",
-        ...
-      }
+      "tier": {
+        "id": "free",
+        "product_id": null,
+        "caps": {"questions": 50, "tts_minutes": 5.0, "credits": 20}
+      },
+      "used": {"questions": 0, "tts_seconds": 0.0, "credits": 3},
+      "remaining": {"questions": 50, "tts_minutes": 5.0, "credits": 17}
     }
     ```
   </Tab>
@@ -97,7 +96,11 @@ Your current credit usage is included in your profile and bootstrap responses, a
   </Tab>
 </Tabs>
 
-When `credits_used` equals `credits_total`, the next AI operation that requires credits returns `429 Too Many Requests`. Free-tier accounts recover automatically when the daily reset fires.
+When `used.credits` equals `tier.caps.credits` (or `credits_used` equals `credits_total` on the profile), the next AI operation that requires credits returns `429 Too Many Requests`. Free-tier accounts recover at the start of the next monthly period.
+
+<Info>
+  The `questions` and `tts_seconds` counters on `GET /v1/usage` currently return `0` until the usage aggregator is wired. The caps and remaining math are still authoritative — clients can rely on the shape today and pick up real counts when the aggregator ships.
+</Info>
 
 ## Rate limits
 
