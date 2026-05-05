@@ -1,0 +1,177 @@
+---
+title: "Idea pipeline, cards, and section retry"
+description: "Submit raw ideas to the microservice DAG, replay accumulated cards on cold launch, and re-fire individual sections of the research fan-out when one stage fails."
+---
+
+The pipeline endpoints power the idea → research → build DAG. Submitting an idea returns immediately with a placeholder card; downstream microservices emit additional cards as they complete, and clients receive them in real time over WebSocket. The card endpoints provide a replay surface for cold launches and reconnects.
+
+## Submit an idea
+
+Accept a raw idea, persist a placeholder card, fire the pipeline event, and return immediately. The DAG handles normalization and downstream fanout asynchronously — clients see real-time cards via the [WebSocket realtime channel](/api-reference/toasts).
+
+Rate limit: **20 requests per minute**.
+
+```
+POST /v1/ideas
+```
+
+<ParamField body="idea" type="string" required>
+  Raw idea text. Length 3–5000 chars.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  Optional project to attach the idea to.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/v1/ideas \
+  -H "Authorization: Bearer <session_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"idea": "AI expense tracker for freelancers"}'
+```
+
+</CodeGroup>
+
+```json 201 response
+{
+  "card_id": "01HXY7Z1...",
+  "status": "in_progress"
+}
+```
+
+## Pick features for build planning
+
+After feature research completes, the user can hand-pick which features feed into auto-plan-build. This re-runs build planning with the user's selection rather than the model's default ranking.
+
+Rate limit: **10 requests per minute**.
+
+```
+POST /v1/pipeline/feature-selection
+```
+
+<ParamField body="research_id" type="string" required>
+  Research job that produced the feature list.
+</ParamField>
+
+<ParamField body="project_id" type="string">
+  Optional override; defaults to the research job's project.
+</ParamField>
+
+<ParamField body="selected_feature_ids" type="array" required>
+  IDs of features from the research job's `features` array. Length 1–50; capped at the first 10 internally because auto-plan-build is most accurate with 3–6 features.
+</ParamField>
+
+```json 202 response
+{
+  "card_id": "01HXY7Z1..."
+}
+```
+
+Returns `400 no_features_resolved` when none of the supplied IDs match the research job's feature list, and `404 research_not_found` if the research job does not exist or is not owned by the caller.
+
+## Retry a research section
+
+Re-fire a single microservice for a research job. Used when one section of the fan-out failed but the rest of the chain succeeded — for example, when signals timed out while competitors, features, and whitespaces all landed.
+
+The endpoint emits a fresh `*_retrying` card immediately so the client sees the retry land before the worker completes. The microservice emits its own `*_ready` (or `*_failed`) card on completion.
+
+Rate limit: **10 requests per minute**.
+
+```
+POST /v1/pipeline/retry-section
+```
+
+<ParamField body="research_id" type="string" required>
+  Research job whose section should be re-run.
+</ParamField>
+
+<ParamField body="section" type="string" required>
+  One of `competitors`, `features`, `signals`, `whitespaces`, `priorities`, `build_plan`.
+</ParamField>
+
+```json 202 response
+{
+  "card_id": "01HXY7Z1...",
+  "status": "in_progress"
+}
+```
+
+### Section behavior
+
+| Section | Re-runs |
+|---|---|
+| `competitors` | Competitor discovery |
+| `features` | Feature extraction |
+| `signals` | Signal gathering |
+| `whitespaces` | Whitespace identification |
+| `priorities` | Re-ranks features for build planning |
+| `build_plan` | Re-runs auto-plan-build (requires a prior `priorities_picked` card) |
+
+### Error codes
+
+| Status | Detail | Meaning |
+|---|---|---|
+| `400` | `invalid_section: must be one of [...]` | Unknown section name. |
+| `403` | `forbidden` | The research job is owned by a different user. |
+| `404` | `research_not_found` | Research id does not exist. |
+| `409` | `no_priorities_picked_yet — retry section=priorities first` | `build_plan` retry attempted before any priorities were picked. |
+| `409` | `priorities_card_missing_features — retry section=priorities first` | Prior priorities card has no resolved features. |
+
+## List recent cards
+
+Paged list of pipeline cards for the authenticated user. Used on cold launch and as a replay fallback when a WebSocket reconnect misses live events.
+
+Rate limit: **60 requests per minute**.
+
+```
+GET /v1/cards
+```
+
+<ParamField query="project_id" type="string">
+  Filter to a single project.
+</ParamField>
+
+<ParamField query="after" type="string">
+  ISO 8601 timestamp. Returns cards strictly older than this — pass the previous batch's last `created_at` to paginate backwards.
+</ParamField>
+
+<ParamField query="limit" type="number" default="50">
+  Page size. Range 1–200.
+</ParamField>
+
+```json 200 response
+{
+  "items": [
+    {
+      "id": "01HXY7Z1...",
+      "project_id": "01HXY7AA...",
+      "parent_card_id": null,
+      "source_msvc": "submit-idea",
+      "card_type": "idea_received",
+      "title": "AI expense tracker for freelancers",
+      "body": {
+        "raw_idea_preview": "AI expense tracker for freelancers"
+      },
+      "status": "in_progress",
+      "cta_actions": null,
+      "scope": "private",
+      "created_at": "2026-05-05T08:30:00+00:00"
+    }
+  ],
+  "count": 1
+}
+```
+
+<ResponseField name="items" type="array" required>
+  Newest cards first. Each item carries the originating microservice (`source_msvc`), a typed card discriminator (`card_type`), free-form `body`, optional follow-up `cta_actions`, and a privacy `scope` of `private`, `workspace`, or `public`.
+</ResponseField>
+
+<ResponseField name="count" type="number" required>
+  Number of items in this page.
+</ResponseField>
+
+<Tip>
+  Cards are ephemeral UI surfaces, not the canonical state. Read research, build graphs, and projects from their dedicated endpoints once a card resolves — cards are only the real-time progress overlay.
+</Tip>

@@ -1,0 +1,159 @@
+---
+title: "Admin credit ledger and goodwill grants"
+description: "Server-side surface for granting, deducting, and inspecting RevenueCat virtual-currency balances. Used by ops, customer support, and future admin tooling."
+---
+
+The admin credit endpoints wrap the RevenueCat v2 virtual-currency ledger so customer support can grant goodwill credits, reverse purchases, and inspect balances without each operator holding a RevenueCat API key on their machine. Every grant fires a `usage.changed` silent push so iOS clients refresh their balance immediately.
+
+<Warning>
+  These endpoints are admin-gated and not intended for app-side calls. Every adjustment is auditable on the RevenueCat dashboard — never adjust balances via SQL or backend hacks.
+</Warning>
+
+## Authentication
+
+All admin credit endpoints require the shared admin bearer token in the `Authorization` header:
+
+```
+Authorization: Bearer <admin_secret>
+```
+
+The same shared secret already gates `/internal/*` endpoints. Rotate via your secrets manager when staffing changes.
+
+If the secret is unset on the server, every endpoint returns `503 admin_unconfigured`. If the bearer is missing, `401 missing_bearer`. If it does not match, `403 invalid_admin_secret`.
+
+## List configured currencies
+
+Returns the project's configured virtual currency types. The default project is configured with `CRD = Credits` and product grants tied to every IAP subscription tier.
+
+Rate limit: **60 requests per minute**.
+
+```
+GET /admin/credits/currencies
+```
+
+<CodeGroup>
+
+```bash curl
+curl https://api.manticscore.com/admin/credits/currencies \
+  -H "Authorization: Bearer <admin_secret>"
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "items": [
+    {
+      "code": "CRD",
+      "name": "Credits",
+      "description": "ManticScore credits",
+      "product_grants": [
+        { "product_id": "com.bairisland.manticscore.pro.monthly", "amount": 500 }
+      ]
+    }
+  ]
+}
+```
+
+If the RevenueCat v2 API key or project id are not configured server-side, the endpoint returns `503` with a descriptive detail.
+
+## Get balances for a user
+
+Returns all virtual currency balances for one customer, keyed by Clerk `user_id`.
+
+Rate limit: **120 requests per minute**.
+
+```
+GET /admin/credits/balances/{user_id}
+```
+
+<ParamField path="user_id" type="string" required>
+  Clerk user id (e.g. `user_2abcXYZ`).
+</ParamField>
+
+<ParamField query="include_empty" type="boolean" default="false">
+  When `true`, includes balances of zero in the response. Default omits them.
+</ParamField>
+
+```json 200 response
+{
+  "balances": [
+    { "code": "CRD", "name": "Credits", "balance": 145 }
+  ]
+}
+```
+
+Returns `404 rc_customer_not_found` if the user has no RevenueCat customer record (for example, they have never opened the app or hit any RC SDK call).
+
+## Grant or deduct credits
+
+Adjust a user's credit balance with a required audit reason. Positive amounts grant; negative amounts deduct. Zero is rejected with `400 amount_must_be_nonzero`.
+
+Every call writes an auditable transaction on the RevenueCat dashboard and fires a `usage.changed` silent push so the user's iOS client refreshes its balance immediately without a foreground prompt.
+
+Rate limit: **30 requests per minute**.
+
+```
+POST /admin/credits/{user_id}/grant
+```
+
+<ParamField path="user_id" type="string" required>
+  Clerk user id of the customer to adjust.
+</ParamField>
+
+<ParamField body="amount" type="integer" required>
+  Positive grants, negative deducts. Must be non-zero.
+</ParamField>
+
+<ParamField body="reason" type="string" required>
+  Audit-trail note shown on the RevenueCat dashboard. Required, 3–500 chars. Always include a ticket reference.
+</ParamField>
+
+<ParamField body="currency_code" type="string" default="CRD">
+  Virtual currency code. Defaults to `CRD` (Credits).
+</ParamField>
+
+<ParamField body="idempotency_key" type="string">
+  Optional client-supplied idempotency key (max 200 chars). Replaying the same key short-circuits duplicate adjustments.
+</ParamField>
+
+<CodeGroup>
+
+```bash curl
+curl -X POST https://api.manticscore.com/admin/credits/user_2abcXYZ/grant \
+  -H "Authorization: Bearer <admin_secret>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 50,
+    "reason": "goodwill: chat hung mid-response 2026-05-04, ticket #1234"
+  }'
+```
+
+</CodeGroup>
+
+```json 200 response
+{
+  "ok": true,
+  "amount": 50,
+  "currency": "CRD",
+  "result": {
+    "transaction_id": "txn_...",
+    "new_balance": 195
+  }
+}
+```
+
+### Error codes
+
+| Status | Detail | Meaning |
+|---|---|---|
+| `400` | `amount_must_be_nonzero` | The `amount` field was `0`. |
+| `401` | `missing_bearer` | No `Authorization` header. |
+| `403` | `invalid_admin_secret` | Bearer did not match the configured admin secret. |
+| `404` | `rc_customer_not_found` | The user has no RevenueCat customer record. |
+| `502` | `rc_call_failed: <type>` | Upstream RevenueCat call raised an error. Retry or escalate. |
+| `503` | `admin_unconfigured` | The admin secret or RevenueCat v2 credentials are unset server-side. |
+
+<Tip>
+  For terminal-based ops, see the bundled `scripts/grant-credits.sh` script. By default it routes through this endpoint (so operators only need the admin bearer), with a direct RevenueCat v2 fallback when the API key is available locally.
+</Tip>

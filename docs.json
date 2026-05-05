@@ -113,6 +113,20 @@
               "api-reference/automations",
               "api-reference/ship"
             ]
+          },
+          {
+            "group": "Pipeline & Realtime",
+            "pages": [
+              "api-reference/pipeline",
+              "api-reference/toasts"
+            ]
+          },
+          {
+            "group": "Billing & Admin",
+            "pages": [
+              "api-reference/billing",
+              "api-reference/admin-credits"
+            ]
           }
         ]
       }

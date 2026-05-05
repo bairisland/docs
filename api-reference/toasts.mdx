@@ -1,0 +1,275 @@
+---
+title: "Realtime toasts and in-app notifications"
+description: "Bootstrap a WebSocket session, subscribe to user-scoped topics, register a device for APNS fallback, and publish toasts from external services."
+---
+
+The toast endpoints power realtime in-app notifications. The flow is:
+
+1. Exchange a Clerk session for a short-lived WebSocket token.
+2. Open a WebSocket to the realtime gateway with that token.
+3. Subscribe to one or more topics (always within your own user namespace).
+4. (Optional) Register an APNS token so undelivered toasts fall back to a push notification.
+
+Internal services publish toasts directly inside the API process. External services use the publish endpoint with a shared bearer secret.
+
+## Bootstrap a WebSocket token
+
+Mint a short-lived WebSocket token bound to a (user, device) pair. Clients call this with their Clerk session, then open a WebSocket to the URL returned in the response.
+
+Rate limit: **30 requests per minute**.
+
+```
+POST /v1/sessions/toast-bootstrap
+```
+
+<ParamField body="device_id" type="string" required>
+  Stable per-device identifier.
+</ParamField>
+
+<ParamField body="bundle_id" type="string" default="com.bairisland.manticscore">
+  iOS bundle identifier of the calling app.
+</ParamField>
+
+<ParamField body="default_topics" type="array">
+  Topics to pre-subscribe at connect. Topics outside the user's own namespace are silently dropped — only `user:<user_id>:*` and arbitrary non-`user:*` topics are allowed.
+</ParamField>
+
+```json 200 response
+{
+  "token": "<opaque ws token>",
+  "ws_url": "wss://api.manticscore.com/api/v1/realtime?token=<opaque ws token>",
+  "expires_at": "2026-05-05T08:45:00+00:00",
+  "default_topics": ["user:user_2abcXYZ:default"]
+}
+```
+
+<ResponseField name="token" type="string" required>
+  Short-lived WebSocket token (15-minute TTL). Treat as a credential.
+</ResponseField>
+
+<ResponseField name="ws_url" type="string" required>
+  Pre-formatted WebSocket URL with the token embedded as a query parameter.
+</ResponseField>
+
+<ResponseField name="expires_at" type="string" required>
+  ISO 8601 timestamp when the token expires. Re-bootstrap before this to maintain a continuous connection.
+</ResponseField>
+
+<ResponseField name="default_topics" type="array" required>
+  The subset of `default_topics` that passed the namespace check.
+</ResponseField>
+
+## Register a device for APNS fallback
+
+Register (or refresh) an iOS device for APNS fallback delivery. Toasts dispatched while no foreground WebSocket is connected are forwarded to APNS instead of dropped.
+
+Rate limit: **30 requests per minute**.
+
+```
+POST /v1/devices/register-toast
+```
+
+<ParamField body="device_id" type="string" required>
+  Stable per-device identifier; must match the one used in `toast-bootstrap`.
+</ParamField>
+
+<ParamField body="bundle_id" type="string" default="com.bairisland.manticscore">
+  iOS bundle identifier.
+</ParamField>
+
+<ParamField body="apns" type="object">
+  <Expandable title="properties">
+    <ParamField body="device_token" type="string">
+      APNS device token. Send `null` to disable fallback.
+    </ParamField>
+    <ParamField body="environment" type="string" default="sandbox">
+      One of `sandbox` or `production`.
+    </ParamField>
+    <ParamField body="fallback_enabled" type="boolean" default="false">
+      When `true`, the server falls back to APNS for toasts dispatched while no foreground WebSocket is connected.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+```json 200 response
+{
+  "registered": true,
+  "device_id": "device-uuid",
+  "apns_fallback_enabled": true
+}
+```
+
+## Publish a toast from an external service
+
+External publishers (separate services or scripts) call this endpoint to deliver a toast to a user. Internal services should call `services.toasts.publish_toast()` directly instead — no HTTP round-trip, no shared secret.
+
+Rate limit: **120 requests per minute**.
+
+```
+POST /v1/toasts/publish
+```
+
+Authentication is a bearer token whose value is the shared `TOAST_PUBLISH_SECRET_KEY`:
+
+```
+Authorization: Bearer <toast_publish_secret>
+```
+
+<ParamField body="user_id" type="string" required>
+  Recipient Clerk user id.
+</ParamField>
+
+<ParamField body="topic" type="string" required>
+  Topic to publish on. Subscribers receive only the topics they have explicitly subscribed to.
+</ParamField>
+
+<ParamField body="toast" type="object" required>
+  <Expandable title="properties">
+    <ParamField body="title" type="string" required>
+      Headline. Required.
+    </ParamField>
+    <ParamField body="body" type="string">
+      Optional body text.
+    </ParamField>
+    <ParamField body="style" type="string" default="info">
+      Visual style hint. Common values: `info`, `success`, `warning`, `error`.
+    </ParamField>
+    <ParamField body="priority" type="string" default="normal">
+      Delivery priority. Common values: `low`, `normal`, `high`.
+    </ParamField>
+    <ParamField body="duration_ms" type="number" default="3000">
+      Display duration in milliseconds.
+    </ParamField>
+    <ParamField body="deeplink" type="string">
+      Optional deep link to open on tap.
+    </ParamField>
+    <ParamField body="metadata" type="object">
+      Free-form metadata forwarded to the client.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="dedupe_key" type="string">
+  Optional. The server drops a toast if another with the same `dedupe_key` was delivered to this user recently.
+</ParamField>
+
+<ParamField body="collapse_key" type="string">
+  Optional. The client collapses toasts that share a `collapse_key`, replacing the previous one in place.
+</ParamField>
+
+<ParamField body="ttl_ms" type="number">
+  Optional. Server-side TTL after which the toast is dropped if not delivered.
+</ParamField>
+
+<ParamField body="fallback_apns" type="boolean" default="true">
+  When `true`, the server falls back to APNS if the user has no foreground WebSocket connection.
+</ParamField>
+
+```json 202 response
+{
+  "delivered": true,
+  "transport": "websocket",
+  "session_count": 1
+}
+```
+
+Returns `401 invalid_publish_key` if the bearer is wrong, and `503 toast_publish_disabled` if the secret is unset server-side.
+
+## List recent toasts for the current user
+
+Replay surface for the authenticated user. Useful for a notification-center UI.
+
+Rate limit: **60 requests per minute**.
+
+```
+GET /v1/toasts
+```
+
+<ParamField query="limit" type="number" default="50">
+  Page size, range 1–200.
+</ParamField>
+
+```json 200 response
+{
+  "items": [
+    {
+      "id": "01HXY7Z1...",
+      "topic": "user:user_2abcXYZ:default",
+      "title": "Research complete",
+      "body": "AI expense tracker for freelancers",
+      "style": "success",
+      "priority": "normal",
+      "deeplink": "manticscore://research/01HXY7AA...",
+      "created_at": "2026-05-05T08:35:00+00:00"
+    }
+  ]
+}
+```
+
+## WebSocket realtime gateway
+
+Open a multiplexed WebSocket to receive toasts in realtime.
+
+```
+GET wss://api.manticscore.com/api/v1/realtime?token=<ws_token>
+```
+
+The token is obtained from `POST /v1/sessions/toast-bootstrap` and expires after 15 minutes. Connections with an expired or unknown token receive an `error` frame and a close with code `4001`. Connections without a token are closed with code `4002`.
+
+### Server frames
+
+On successful connect, the server immediately sends:
+
+```json
+{
+  "type": "connection_ack",
+  "session_id": "<uuid>",
+  "topics": ["user:user_2abcXYZ:default"]
+}
+```
+
+Subsequent server frames carry typed messages — toasts, control envelopes, and protocol acks.
+
+### Client messages
+
+The client may send the following JSON messages:
+
+<Tabs>
+  <Tab title="subscribe">
+    ```json
+    {"type": "subscribe", "topics": ["user:user_2abcXYZ:builds"]}
+    ```
+
+    Topics outside the user's own namespace are rejected with an `error` frame of code `topic_not_allowed`.
+  </Tab>
+  <Tab title="unsubscribe">
+    ```json
+    {"type": "unsubscribe", "topics": ["user:user_2abcXYZ:builds"]}
+    ```
+  </Tab>
+  <Tab title="client_state">
+    ```json
+    {"type": "client_state", "foreground_state": "foreground", "overlay_mounted": true}
+    ```
+
+    `foreground_state` accepts `foreground`, `background`, or `unknown`. Unknown values are coerced to `unknown`.
+  </Tab>
+  <Tab title="ping">
+    ```json
+    {"type": "ping"}
+    ```
+
+    Server replies with `{"type": "pong"}`. The heartbeat sweeper culls connections idle longer than 60 seconds — send a `ping` at least every 30 seconds.
+  </Tab>
+</Tabs>
+
+### Close codes
+
+| Code | Meaning |
+|---|---|
+| `4001` | Token expired or rejected after upgrade. |
+| `4002` | Missing token at connect. |
+
+<Note>
+  The realtime gateway is multi-worker safe. The publisher uses a Redis pub/sub channel keyed on the user, so any worker holding a foreground connection delivers the toast — APNS fallback is only used when no worker has a connection.
+</Note>
