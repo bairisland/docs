@@ -166,14 +166,19 @@ curl "https://api.manticscore.com/research/7c3d1e9a-.../status" \
 ```json 200 response
 {
   "job_id": "7c3d1e9a-...",
-  "status": "running",
+  "status": "completed",
+  "pipeline_stage": "priorities_picked",
   "last_event_seq": 15,
   "error": null
 }
 ```
 
 <ResponseField name="status" type="string" required>
-  One of `queued`, `running`, `completed`, `failed`.
+  One of `queued`, `running`, `completed`, `failed`. The job transitions to `completed` when the research-side DAG finishes — that is, after `pick-priorities` emits its terminal card. Auto-plan-build is treated as the build phase and runs after research is already marked completed, so clients polling status will see `completed` even while a build graph is still being assembled in the background.
+</ResponseField>
+
+<ResponseField name="pipeline_stage" type="string">
+  Most recent pipeline stage the job advanced through. The terminal value on success is `priorities_picked`, which is set in the same transaction that flips `status` to `completed`. Treat any value other than `priorities_picked` (or a `failed` status) as work still in progress on the research-side DAG.
 </ResponseField>
 
 <ResponseField name="last_event_seq" type="number" required>
