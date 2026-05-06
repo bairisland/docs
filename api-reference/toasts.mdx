@@ -284,5 +284,6 @@ The same WebSocket also carries silent control messages with envelope `{"type": 
 
 - `usage.changed` — fired when an entitlement transitions (RC webhook event, Apple server-to-server notification, or admin credit grant). The client refetches `GET /v1/usage`.
 - `flags.changed` — broadcast to all clients when CMS feature flags update.
+- `research.completed` — fired when a research pipeline run reaches a terminal completed state. Lets the client exit its `/research/{id}/status` polling loop immediately instead of waiting for the next poll tick. The `params` payload includes `research_id`, `project_id`, `pipeline_stage` (for example, `priorities_picked`), and `picked_count`.
 
 Control envelopes are not persisted and have no APNS fallback — every control kind has a corresponding REST endpoint the client can refetch from on reconnect. SDKs route these to a separate `onControl` handler so they do not surface as toast overlays.
