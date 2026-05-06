@@ -202,10 +202,13 @@ print(response.json())
 
 ```json
 {
-  "status": "running",
+  "status": "completed",
+  "pipeline_stage": "priorities_picked",
   "last_event_seq": 15
 }
 ```
+
+The job transitions to `completed` when the research-side DAG terminates at the `pick-priorities` stage. At that point `pipeline_stage` is set to `priorities_picked` in the same update that flips `status` to `completed`. Until then, polling clients see `status: "running"` with an earlier `pipeline_stage`. Auto-plan-build runs as the build phase after this point and does not delay the `completed` transition.
 
 ## Research result shape
 
