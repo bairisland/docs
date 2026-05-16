@@ -1,16 +1,16 @@
 ---
-title: "Automations: trigger actions when ManticScore events fire"
+title: "Automations: trigger actions when ManticsCore events fire"
 description: "Build event-driven rules that fire when research completes, a build graph is ready, or a PR is created — send output to Slack, Linear, Jira, Notion, or more."
 ---
 
-Automations let you define "when X happens, do Y" rules that ManticScore fires automatically. Configure them once and your team gets a Slack message every time research completes, Linear issues every time a build graph is ready, or a Notion page every time Forge opens a pull request — without any manual step. You can also run any of the 1000+ Composio tools as an action, making automations as flexible as your workflow requires.
+Automations let you define "when X happens, do Y" rules that ManticScore fires automatically. Configure them once and your team gets a Slack message every time research completes, Linear issues every time a build graph is ready, or a Notion page every time Forge opens a pull request — without any manual step. You can also run any of the 1000\+ Composio tools as an action, making automations as flexible as your workflow requires.
 
 ## Triggers and actions
 
 **Triggers** are ManticScore events that fire an automation:
 
 | Trigger | When it fires |
-|---|---|
+| --- | --- |
 | `research_completed` | A market or feature research job finishes |
 | `build_graph_completed` | A build graph is fully generated |
 | `signal_detected` | A new competitive signal is detected for a monitored company |
@@ -20,7 +20,7 @@ Automations let you define "when X happens, do Y" rules that ManticScore fires a
 **Actions** are the operations ManticScore runs in response:
 
 | Action | What it does |
-|---|---|
+| --- | --- |
 | `slack.post` | Posts a message to a Slack channel |
 | `linear.create_issues` | Creates issues in Linear from the triggering build graph |
 | `jira.create_issues` | Creates issues in Jira from the triggering build graph |
@@ -59,7 +59,7 @@ curl -X POST https://api.manticscore.com/automations \
 ```
 
 <Note>
-The integration referenced by `toolkit` must be connected before you create the automation. ManticScore returns `400` if the toolkit is not connected when the automation fires.
+  The integration referenced by `toolkit` must be connected before you create the automation. ManticScore returns `400` if the toolkit is not connected when the automation fires.
 </Note>
 
 ## Common automation recipes
@@ -79,6 +79,7 @@ The integration referenced by `toolkit` must be connected before you create the 
       }'
     ```
   </Accordion>
+
   <Accordion title="Create Linear issues when a build graph is ready">
     ```bash
     curl -X POST https://api.manticscore.com/automations \
@@ -93,6 +94,7 @@ The integration referenced by `toolkit` must be connected before you create the 
       }'
     ```
   </Accordion>
+
   <Accordion title="Export build plans to Notion on completion">
     ```bash
     curl -X POST https://api.manticscore.com/automations \
@@ -107,6 +109,7 @@ The integration referenced by `toolkit` must be connected before you create the 
       }'
     ```
   </Accordion>
+
   <Accordion title="Alert on competitive signals via Slack">
     ```bash
     curl -X POST https://api.manticscore.com/automations \
@@ -121,6 +124,7 @@ The integration referenced by `toolkit` must be connected before you create the 
       }'
     ```
   </Accordion>
+
   <Accordion title="Notify via Slack when Forge opens a PR">
     ```bash
     curl -X POST https://api.manticscore.com/automations \
@@ -188,7 +192,7 @@ A successful delete returns `204 No Content`.
 
 ## Running any Composio tool as an action
 
-The `composio.execute` action lets you invoke any of the 1000+ tools available in Composio — giving automations the same reach as a full Zapier or Shortcuts workflow. Provide the Composio tool slug as `action` and pass arguments in `arguments`.
+The `composio.execute` action lets you invoke any of the 1000\+ tools available in Composio — giving automations the same reach as a full Zapier or Shortcuts workflow. Provide the Composio tool slug as `action` and pass arguments in `arguments`.
 
 ```bash
 curl -X POST https://api.manticscore.com/integrations/execute \
@@ -216,7 +220,7 @@ curl -X POST https://api.manticscore.com/integrations/execute \
 ```
 
 <Tip>
-Use `POST /integrations/execute` to test a Composio action directly before wiring it to an automation. Once it works, add it as a `composio.execute` automation rule.
+  Use `POST /integrations/execute` to test a Composio action directly before wiring it to an automation. Once it works, add it as a `composio.execute` automation rule.
 </Tip>
 
 ## Agent autonomy
@@ -224,7 +228,7 @@ Use `POST /integrations/execute` to test a Composio action directly before wirin
 ManticScore's AI agent can run integration actions on your behalf. You control how much autonomy the agent has with three modes:
 
 | Mode | Behavior |
-|---|---|
+| --- | --- |
 | `suggest` | The agent proposes an action; you approve it before it runs |
 | `confirm` | The agent asks for confirmation before executing |
 | `auto` | The agent runs the configured actions automatically, without asking |
@@ -244,5 +248,5 @@ curl -X PATCH https://api.manticscore.com/profile/agent-config \
 The `auto_actions` list controls which specific actions the agent runs automatically when `autonomy_level` is `auto`. Actions not in the list still require confirmation.
 
 <Warning>
-Setting `autonomy_level` to `auto` with `linear.create_issues` or `jira.create_issues` in `auto_actions` means ManticScore will create issues in your tracker without prompting you. Start with `confirm` and switch to `auto` once you are satisfied with the output.
+  Setting `autonomy_level` to `auto` with `linear.create_issues` or `jira.create_issues` in `auto_actions` means ManticScore will create issues in your tracker without prompting you. Start with `confirm` and switch to `auto` once you are satisfied with the output.
 </Warning>

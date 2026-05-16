@@ -1,5 +1,5 @@
 ---
-title: "Authenticate with the ManticScore API"
+title: "Authenticate with the ManticsCore API"
 description: "Learn how to get a Clerk JWT, exchange it for a session token, make authenticated requests, refresh tokens, and handle auth errors."
 ---
 
@@ -11,7 +11,7 @@ This page explains the full authentication lifecycle from login to logout.
 
 Every protected endpoint requires an `Authorization` header with a `Bearer` token:
 
-```
+```text
 Authorization: Bearer <token>
 ```
 
@@ -46,10 +46,10 @@ ManticScore uses Clerk as its identity provider. You get a Clerk JWT from the Cl
   <Tab title="JavaScript SDK">
     ```javascript
     import { useAuth } from "@clerk/clerk-react";
-
+    
     function MyComponent() {
       const { getToken } = useAuth();
-
+    
       async function callManticScore() {
         const clerkJwt = await getToken();
         // Pass clerkJwt to POST /auth/session
@@ -60,9 +60,9 @@ ManticScore uses Clerk as its identity provider. You get a Clerk JWT from the Cl
   <Tab title="Python SDK">
     ```python
     from clerk_backend_api import Clerk
-
+    
     client = Clerk(bearer_auth="<your_clerk_secret_key>")
-
+    
     # Retrieve a session JWT for a known session ID
     session = client.sessions.get_token(
         session_id="sess_...",
@@ -94,7 +94,7 @@ curl -X POST https://api.manticscore.com/auth/session \
 ```
 
 | Field | Type | Description |
-|---|---|---|
+| --- | --- | --- |
 | `token` | string | Opaque session token — use this on all subsequent requests |
 | `expires_in` | integer | Seconds until expiry (always `1800` — 30 minutes) |
 
@@ -302,7 +302,7 @@ The token is immediately invalidated. Any subsequent requests using that token w
 All auth errors return `4xx` JSON responses with a `detail` field.
 
 | Status | `detail` | Cause |
-|---|---|---|
+| --- | --- | --- |
 | `401` | `"Missing Bearer token"` | `Authorization` header is absent |
 | `401` | `"Token expired"` | Session token TTL has elapsed |
 | `401` | `"Invalid token: ..."` | Token is malformed or unrecognized |

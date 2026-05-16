@@ -1,5 +1,5 @@
 ---
-title: "Integrations overview: connect your tools to ManticScore"
+title: "Integrations overview: connect your tools to ManticsCore"
 description: "Connect ManticScore to 18+ tools — GitHub, Linear, Jira, Slack, Notion, Gmail, and more — to ship research and build plans directly into your existing workflow."
 ---
 
@@ -9,9 +9,11 @@ ManticScore integrates with the tools you already use for code, tasks, and commu
   <Card title="GitHub" icon="github" href="/integrations/github">
     Connect repos, create PRs, and ship build plans as Forge runs.
   </Card>
+
   <Card title="Linear & Jira" icon="circle-check" href="/integrations/linear-jira">
     Turn build nodes into tracked issues in your preferred task tracker.
   </Card>
+
   <Card title="Slack & Notion" icon="bell" href="/integrations/slack-notion">
     Share research and build plans to Slack channels or Notion pages.
   </Card>
@@ -62,7 +64,7 @@ curl https://api.manticscore.com/profile/integrations \
 ### Categories
 
 | Category | Integrations |
-|---|---|
+| --- | --- |
 | **Code** | GitHub |
 | **Tasks** | Linear, Jira |
 | **Messaging & docs** | Slack, Notion, Gmail |
@@ -103,7 +105,7 @@ To connect any integration, call `POST /profile/integrations/{toolkit}/connect`.
 </Steps>
 
 <Note>
-GitHub uses a separate native OAuth flow via `POST /auth/github/start` rather than the Composio path. See the [GitHub integration guide](/integrations/github) for details.
+  GitHub uses a separate native OAuth flow via `POST /auth/github/start` rather than the Composio path. See the [GitHub integration guide](/integrations/github) for details.
 </Note>
 
 ## Disconnecting
@@ -155,7 +157,7 @@ curl -X PATCH https://api.manticscore.com/profile/integrations/slack/defaults \
 ```
 
 <Tip>
-ManticScore sets initial defaults automatically after the OAuth flow completes. You only need to call this endpoint if you want to override a specific field or point ManticScore at a different resource.
+  ManticScore sets initial defaults automatically after the OAuth flow completes. You only need to call this endpoint if you want to override a specific field or point ManticScore at a different resource.
 </Tip>
 
 ## What happens after you connect

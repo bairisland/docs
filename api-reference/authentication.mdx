@@ -1,9 +1,9 @@
 ---
-title: "Authenticating requests to the ManticScore API"
+title: "Authenticating requests to the ManticsCore API"
 description: "Exchange a Clerk JWT for a session token, start anonymous sessions for zero-friction onboarding, rebind on sign-in, and call bootstrap to hydrate your app state on launch."
 ---
 
-ManticScore supports two ways to obtain a session token:
+ManticsCore supports two ways to obtain a session token:
 
 - **Authenticated sessions** — start from a Clerk JWT and exchange it for an opaque session token tied to your Clerk user id.
 - **Anonymous sessions** — start from a stable device id (no sign-in required) and receive a session token tied to an anonymous principal. When the user later signs in, a single rebind call re-owns every anonymous artifact to the authenticated account.
@@ -77,7 +77,7 @@ const { token } = await response.json();
 
 Include the session token as a Bearer token on every protected endpoint:
 
-```
+```text
 Authorization: Bearer <session_token>
 ```
 
@@ -200,15 +200,19 @@ const bootstrap = await fetch("https://api.manticscore.com/auth/bootstrap", {
     <ResponseField name="name" type="string">
       Display name on the account.
     </ResponseField>
+
     <ResponseField name="email" type="string">
       Email address on the account.
     </ResponseField>
+
     <ResponseField name="plan" type="string">
       Subscription tier. Currently `free` or `pro`.
     </ResponseField>
+
     <ResponseField name="credits_used" type="number">
       Credits consumed in the current billing window.
     </ResponseField>
+
     <ResponseField name="credits_total" type="number">
       Total credits available in the current billing window.
     </ResponseField>
@@ -224,6 +228,7 @@ const bootstrap = await fetch("https://api.manticscore.com/auth/bootstrap", {
     <ResponseField name="has_github_pat" type="boolean">
       Whether you have a GitHub personal access token stored.
     </ResponseField>
+
     <ResponseField name="has_anthropic_key" type="boolean">
       Whether you have an Anthropic API key stored.
     </ResponseField>
@@ -296,7 +301,7 @@ const { token } = await response.json();
 **Errors**
 
 | Status | Body | Cause |
-|--------|------|-------|
+| --- | --- | --- |
 | `422` | `{"detail": "device_id required"}` | `device_id` is missing or empty |
 
 ## Rebind an anonymous session to a signed-in user
@@ -372,7 +377,7 @@ const result = await response.json();
 **Errors**
 
 | Status | Body | Cause |
-|--------|------|-------|
+| --- | --- | --- |
 | `401` | `{"detail": "Rebind requires an authenticated user token; got anonymous session"}` | The `Authorization` header carried an anonymous session token. Sign the user in first, then call rebind with the authenticated token. |
 | `409` | `{"detail": "device <id> already rebound to a different user"}` | This device was previously rebound to a different Clerk user. Human intervention is required. |
 | `422` | `{"detail": "device_id and clerk_user_id required"}` | The `device_id` field is missing from the body. |
@@ -380,7 +385,7 @@ const result = await response.json();
 ## Auth error reference
 
 | Status | Body | What to do |
-|--------|------|------------|
+| --- | --- | --- |
 | `401` | `{"detail": "Missing Bearer token"}` | Add an `Authorization: Bearer <token>` header |
 | `401` | `{"detail": "Token expired"}` | Call `POST /auth/session` to get a new session token |
 | `401` | `{"detail": "Invalid token: ..."}` | Check that the token was copied correctly and hasn't been tampered with |

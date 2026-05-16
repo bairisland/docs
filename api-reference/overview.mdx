@@ -1,5 +1,5 @@
 ---
-title: "ManticScore API overview and base concepts"
+title: "ManticsCore API overview and base concepts"
 description: "Everything you need to start building on the ManticScore API: base URL, authentication modes, request headers, response formats, and health endpoints."
 ---
 
@@ -7,14 +7,14 @@ The ManticScore API gives you programmatic access to the full platform — marke
 
 **Base URL:** `https://api.manticscore.com`
 
-The API currently exposes **128+ routes** across 29 resource families. All routers are mounted at the root — there is no global path prefix.
+The API currently exposes **128\+ routes** across 29 resource families. All routers are mounted at the root — there is no global path prefix.
 
 ## Authentication modes
 
 Every endpoint uses one of four authentication modes. You'll see these called out on each route.
 
 | Mode | Description |
-|------|-------------|
+| --- | --- |
 | **Required** | Clerk JWT or session token in the `Authorization: Bearer` header |
 | **Stream** | Same as Required, but extends the session TTL on connect for long-lived NDJSON streams |
 | **Public** | No `Authorization` header needed |
@@ -29,7 +29,7 @@ Every endpoint uses one of four authentication modes. You'll see these called ou
 <ParamField header="Authorization" type="string" required>
   Bearer token for all protected endpoints. Send your session token (preferred) or Clerk JWT.
 
-  ```
+  ```text
   Authorization: Bearer <session_token>
   ```
 </ParamField>
@@ -97,9 +97,11 @@ print(response.json())
     <ResponseField name="version" type="string">
       Current release version string.
     </ResponseField>
+
     <ResponseField name="git_sha" type="string">
       Short commit SHA of the deployed build.
     </ResponseField>
+
     <ResponseField name="deployed_at_utc" type="string">
       ISO 8601 timestamp of the last deployment.
     </ResponseField>
